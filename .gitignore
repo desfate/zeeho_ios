@@ -1,0 +1,7 @@
+.DS_Store
+build/
+Shared/LocalToken.swift
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.moved-aside
