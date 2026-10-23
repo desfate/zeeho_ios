@@ -15,10 +15,36 @@ enum ZeehoJSON {
         any as? [String: Any] ?? [:]
     }
 
-    static func firstObject(_ any: Any?) -> [String: Any]? {
+    static func dictionary(_ any: Any?) -> [String: Any]? {
         if let dict = any as? [String: Any] { return dict }
-        if let list = any as? [Any] { return list.first as? [String: Any] }
+        guard let raw = any as? NSDictionary else { return nil }
+        var dict: [String: Any] = [:]
+        for (key, value) in raw {
+            guard let key = key as? String else { continue }
+            dict[key] = value
+        }
+        return dict
+    }
+
+    static func list(_ any: Any?) -> [Any]? {
+        if let list = any as? [Any] { return list }
+        if let list = any as? NSArray { return list.map { $0 } }
         return nil
+    }
+
+    static func firstObject(_ any: Any?) -> [String: Any]? {
+        if let dict = dictionary(any), any as? [Any] == nil, any as? NSArray == nil { return dict }
+        return list(any)?.compactMap { dictionary($0) }.first
+    }
+
+    static func payload(_ any: Any?) -> [String: Any]? {
+        if let text = any as? String,
+           let data = text.data(using: .utf8),
+           let parsed = try? JSONSerialization.jsonObject(with: data) {
+            return payload(parsed)
+        }
+        if let dict = dictionary(any) { return dict }
+        return list(any)?.compactMap { dictionary($0) }.first
     }
 
     static func string(_ any: Any?) -> String {
@@ -109,8 +135,15 @@ struct ZeehoClient {
             let data = ZeehoJSON.object(base.json?["data"])
             let name = ZeehoJSON.string(data["nickName"])
             let avatar = ZeehoJSON.string(data["avatar"])
+            let uid = nonempty(data["userId"])
+                ?? nonempty(data["bindingUserId"])
+                ?? nonempty(data["uid"])
+                ?? nonempty(data["memberId"])
+                ?? nonempty(data["accountId"])
+                ?? nonempty(data["id"])
             if !name.isEmpty { status.nickName = name }
             if !avatar.isEmpty { status.avatar = avatar }
+            if let uid { status.userId = uid }
         }
 
         let summary = await request(method: "GET", path: "/cfmotoservermine/H5/signin", token: token, secrets: secrets, query: "")
@@ -181,6 +214,7 @@ struct ZeehoClient {
                 status.vehicles = vehicles
                 status.vehicle = vehicles[0]
             }
+            await attachInbox(token: token, secrets: secrets, status: &status)
             stamp(&status, now: Date())
             return status
         }
@@ -209,6 +243,7 @@ struct ZeehoClient {
             status.vehicles = vehicles
             status.vehicle = vehicles[0]
         }
+        await attachInbox(token: token, secrets: secrets, status: &status)
         stamp(&status, now: Date())
         return status
     }
@@ -370,6 +405,120 @@ struct ZeehoClient {
         }
     }
 
+    func runCommunityTasks(token: String, userId: String, secrets: ZeehoSecrets, prefs: ZeehoPointsPrefs) async -> (ok: Bool, text: String) {
+        defer { session.finishTasksAndInvalidate() }
+        guard !userId.isEmpty else { return (false, "没有账号 ID，积分任务未执行") }
+        let tasks = await tapi(
+            method: "GET",
+            path: "/v1.0/mine/cfmotoservermine/integral/getByUserId",
+            token: token,
+            secrets: secrets,
+            query: "userId=\(percent(userId))"
+        )
+        if isTokenInvalid(tasks) { return (false, "登录态已失效") }
+        guard ZeehoJSON.isOK(tasks.json) else { return (false, "任务列表读取失败：\(failureText(tasks))") }
+        let list = (ZeehoJSON.object(tasks.json?["data"])["ps0003_01_002_VOList"] as? [Any]) ?? []
+        var notes = ""
+        var postId = ""
+        var published = false
+        var done = 0
+        var failed = 0
+        var authFailed = false
+        for item in list {
+            if authFailed { break }
+            let row = item as? [String: Any] ?? [:]
+            let action = pointsAction(ZeehoJSON.string(row["code"]))
+            if action.isEmpty || ZeehoJSON.string(row["completeFlag"]) == "0" { continue }
+            var target = postId
+            if action == "post" {
+                target = await publishPost(token: token, secrets: secrets, content: prefs.content, userId: userId, notes: &notes)
+                if target.isEmpty { failed += 1 } else {
+                    postId = target
+                    published = true
+                    done += 1
+                }
+            } else {
+                if target.isEmpty { target = await myFirstPost(token: token, userId: userId, secrets: secrets) }
+                if target.isEmpty {
+                    target = await publishPost(token: token, secrets: secrets, content: prefs.content, userId: userId, notes: &notes)
+                    if !target.isEmpty {
+                        postId = target
+                        published = true
+                    }
+                } else {
+                    postId = target
+                }
+                if target.isEmpty {
+                    failed += 1
+                } else if action == "like" {
+                    let liked = await tapi(
+                        method: "POST",
+                        path: "/v1.0/social/cfmotoserversocial/socialCommu/likeFavoriteInfo",
+                        token: token,
+                        secrets: secrets,
+                        body: "{\"postId\":\(jsonQuote(target)),\"kindFlag\":\"0\"}"
+                    )
+                    if isTokenInvalid(liked) {
+                        authFailed = true
+                        notes += "；登录态失效"
+                    } else if ZeehoJSON.isOK(liked.json) {
+                        done += 1
+                    } else {
+                        failed += 1
+                        notes += "；点赞失败：\(failureText(liked))"
+                    }
+                } else {
+                    let shared = await tapi(
+                        method: "PUT",
+                        path: "/v1.0/social/cfmotoserversocial/article/share/\(percent(target))",
+                        token: token,
+                        secrets: secrets
+                    )
+                    if isTokenInvalid(shared) {
+                        authFailed = true
+                        notes += "；登录态失效"
+                    } else if ZeehoJSON.isOK(shared.json) {
+                        done += 1
+                        _ = await tapi(method: "GET", path: "/v1.0/mine/cfmotoservermine/integral/adjustByShare", token: token, secrets: secrets)
+                    } else {
+                        failed += 1
+                        notes += "；分享失败：\(failureText(shared))"
+                    }
+                }
+            }
+            if prefs.gapMs > 0 {
+                let gap = min(max(prefs.gapMs, 0), 5_000)
+                try? await Task.sleep(nanoseconds: UInt64(gap) * 1_000_000)
+            }
+        }
+        if published, prefs.deleteAfter, !postId.isEmpty {
+            let query = "articleId=\(percent(postId))&postType=1"
+            let removed = await tapi(
+                method: "DELETE",
+                path: "/v1.0/social/cfmotoserversocial/commonArticle/deleteArticle",
+                token: token,
+                secrets: secrets,
+                query: query
+            )
+            if !ZeehoJSON.isOK(removed.json) { notes += "；删除动态失败" }
+        }
+        let summary: String
+        if notes.isEmpty, done == 0, failed == 0 {
+            summary = "积分任务已完成"
+        } else {
+            var text = notes
+            text += " · 完成 \(done) 项"
+            if failed > 0 { text += "，失败 \(failed) 项" }
+            summary = text.trimmingCharacters(in: CharacterSet(charactersIn: "· ")).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return (!authFailed && failed == 0, summary)
+    }
+
+    func loadVehicles(token: String, secrets: ZeehoSecrets) async -> [VehicleStatus] {
+        defer { session.finishTasksAndInvalidate() }
+        return await fetchVehicles(token: token, secrets: secrets)
+    }
+
     func chargeOptions(token: String, vin: String, secrets: ZeehoSecrets) async -> [String] {
         defer { session.finishTasksAndInvalidate() }
         let query = "vinNo=\(percent(vin))&flag=1"
@@ -391,26 +540,20 @@ struct ZeehoClient {
         for seed in seeds.prefix(3) {
             var vehicle = seed
             if let vin = vehicle.vin, !vin.isEmpty {
-                if let detail = parseVehicles(await appRequest(
-                    method: "GET",
-                    urlText: "https://tapi.zeehoev.com/v1.0/app/cfmotoserverapp/vehicle/widgets/\(percent(vin))",
-                    token: token,
-                    secrets: secrets
-                ).json).first {
-                    vehicle = mergeVehicle(vehicle, detail)
-                    vehicle.vin = vin
+                let home = await homePage(token: token, vin: vin, secrets: secrets)
+                applyHome(home, to: &vehicle)
+                applyCharge(await batteryStatus(token: token, vin: vin, secrets: secrets), to: &vehicle)
+                if (vehicle.voltageText ?? "").isEmpty {
+                    await fillVoltage(token: token, vin: vin, secrets: secrets, vehicle: &vehicle)
                 }
                 applyTire(await tireStatus(token: token, vin: vin, secrets: secrets), to: &vehicle)
-                applyCharge(await batteryStatus(token: token, vin: vin, secrets: secrets), to: &vehicle)
-                let home = await rideStatus(token: token, vin: vin, secrets: secrets)
+                let ride = await rideStatus(token: token, vin: vin, secrets: secrets)
                 let month = await monthRide(token: token, vin: vin, secrets: secrets)
-                applyRide(home: home, month: month, to: &vehicle)
-                if (vehicle.address ?? "").isEmpty || vehicle.latitude == nil {
-                    applyLocation(await homePage(token: token, vin: vin, secrets: secrets), to: &vehicle)
-                }
+                applyRide(home: home, ride: ride, month: month, to: &vehicle)
                 if (vehicle.address ?? "").isEmpty, let latitude = vehicle.latitude, let longitude = vehicle.longitude {
                     vehicle.address = await placeName(latitude: latitude, longitude: longitude)
                 }
+                vehicle.vin = vin
                 await cachePicture(vehicle)
             }
             enriched.append(vehicle)
@@ -495,6 +638,18 @@ struct ZeehoClient {
             let temp = low == high ? String(format: "%.0f°C", low) : String(format: "%.0f–%.0f°C", low, high)
             vehicle.pressureText = "\(vehicle.pressureText!) · \(temp)"
         }
+        func bar(_ row: [String: Any]?) -> Double? {
+            guard let row else { return nil }
+            return ZeehoJSON.double(row["tirePressure"] ?? row["pressure"] ?? row["value"]).flatMap { $0 > 0 ? $0 : nil }
+        }
+        vehicle.frontBar = bar(front)
+        vehicle.rearBar = bar(rear)
+        let warned = rows.contains { row in
+            guard let flag = ZeehoJSON.int(row["warningType"]) else { return false }
+            return flag != 0
+        }
+        let lowBar = [vehicle.frontBar, vehicle.rearBar].compactMap { $0 }.contains { $0 > 0 && $0 < 1.9 }
+        vehicle.tireWarn = warned || lowBar
     }
 
     private func batteryStatus(token: String, vin: String, secrets: ZeehoSecrets) async -> [String: Any]? {
@@ -505,14 +660,181 @@ struct ZeehoClient {
             secrets: secrets
         )
         guard ZeehoJSON.isOK(result.json) else { return nil }
-        return ZeehoJSON.object(result.json?["data"])
+        return ZeehoJSON.payload(result.json?["data"])
+    }
+
+    private func widgetStatus(token: String, vin: String, secrets: ZeehoSecrets) async -> [String: Any]? {
+        let result = await appRequest(
+            method: "GET",
+            urlText: "https://tapi.zeehoev.com/v1.0/app/cfmotoserverapp/vehicle/widgets/\(percent(vin))",
+            token: token,
+            secrets: secrets
+        )
+        guard ZeehoJSON.isOK(result.json) else { return nil }
+        return ZeehoJSON.payload(result.json?["data"])
+    }
+
+    private func snapshotStatus(token: String, vin: String, secrets: ZeehoSecrets) async -> [String: Any]? {
+        let query = "vinNo=\(percent(vin))"
+        let result = await appRequest(
+            method: "GET",
+            urlText: "https://tapi.zeehoev.com/v1.0/app/cfmotoserverapp/app/vehicles/properties/snapshots?\(query)",
+            token: token,
+            secrets: secrets,
+            query: query
+        )
+        guard ZeehoJSON.isOK(result.json) else { return nil }
+        return ZeehoJSON.payload(result.json?["data"])
+    }
+
+    private func fillVoltage(token: String, vin: String, secrets: ZeehoSecrets, vehicle: inout VehicleStatus) async {
+        let sources = [
+            await widgetStatus(token: token, vin: vin, secrets: secrets),
+            await snapshotStatus(token: token, vin: vin, secrets: secrets),
+        ]
+        for source in sources {
+            guard let source, let volts = chargeVolts(source), volts > 0 else { continue }
+            vehicle.voltageText = String(format: "%.1f V", volts)
+            return
+        }
     }
 
     private func applyCharge(_ data: [String: Any]?, to vehicle: inout VehicleStatus) {
         guard let data else { return }
         let raw = nonempty(data["chargeStateStr"]) ?? nonempty(data["chargeState"]) ?? ""
         let label = chargeLabel(raw)
-        if label != "未知" { vehicle.chargeText = label }
+        if label != "未知" {
+            vehicle.chargeText = label
+        } else if VehicleRoster.flagOn(data["whetherChargeState"]) {
+            vehicle.chargeText = "充电中"
+        }
+        if let soc = ZeehoJSON.int(data["bmssoc"] ?? data["soc"] ?? data["batteryLevel"]) {
+            vehicle.battery = soc
+        }
+        let volts = chargeVolts(data)
+        if let volts, volts > 0 {
+            vehicle.voltageText = String(format: "%.1f V", volts)
+        }
+        if let amps = ZeehoJSON.double(data["current"]), abs(amps) >= 0.05 {
+            vehicle.currentText = String(format: "%.1f A", abs(amps))
+        }
+        let amps = ZeehoJSON.double(data["current"])
+        let watts = ZeehoJSON.double(data["power"]) ?? volts.flatMap { v in amps.map { v * abs($0) } }
+        if let watts, watts >= 1 {
+            vehicle.powerText = "\(Int(watts.rounded())) W"
+        }
+        if let eta = nonempty(data["expectFullTimeDescribe"]) {
+            vehicle.etaText = eta
+        } else if let minutes = fullMinutes(data) {
+            vehicle.etaText = VehicleRoster.minutesLabel(minutes)
+        }
+        if let charged = nonempty(data["chargeTimeString"]) {
+            vehicle.chargedText = charged
+        }
+    }
+
+    private func chargeVolts(_ data: [String: Any]) -> Double? {
+        let keys = ["voltage", "batteryVoltage", "bmsVoltage", "totalVoltage", "batteryTotalVoltage", "batVoltage", "batteryVol"]
+        if let value = positive(data, keys: keys) { return value }
+        if let nested = ZeehoJSON.firstObject(data["batteryInfoList"]) ?? ZeehoJSON.dictionary(data["batteryInfo"]),
+           let value = positive(nested, keys: keys) {
+            return value
+        }
+        if let value = deepVolt(data, keys: keys, depth: 0) { return value }
+        return iotVolt(data)
+    }
+
+    private func deepVolt(_ any: Any?, keys: [String], depth: Int) -> Double? {
+        guard depth < 6 else { return nil }
+        if let dict = ZeehoJSON.dictionary(any) {
+            if depth > 0, let value = positive(dict, keys: keys) { return value }
+            if let value = iotVolt(dict) { return value }
+            for key in dict.keys.sorted() where !keys.contains(key) {
+                if let found = deepVolt(dict[key], keys: keys, depth: depth + 1) { return found }
+            }
+        } else if let list = ZeehoJSON.list(any) {
+            for item in list {
+                if let found = deepVolt(item, keys: keys, depth: depth + 1) { return found }
+            }
+        }
+        return nil
+    }
+
+    private func iotVolt(_ data: [String: Any]) -> Double? {
+        let lists = ["iotProperties", "properties", "propertyList", "vehicleProperties"]
+        let rows = lists.compactMap { ZeehoJSON.list(data[$0]) }.flatMap { $0 }
+        guard !rows.isEmpty else { return nil }
+        for item in rows {
+            guard let row = ZeehoJSON.dictionary(item) else { continue }
+            let identify = ZeehoJSON.string(row["identify"] ?? row["propertyCode"] ?? row["code"] ?? row["key"]).lowercased()
+            guard identify.contains("volt"), !identify.contains("status"), !identify.contains("flag") else { continue }
+            let raw = row["value"] ?? row["propertyValue"] ?? row["propValue"] ?? row["val"]
+            if let value = number(raw), let volts = packVolts(value) { return volts }
+        }
+        return nil
+    }
+
+    private func positive(_ data: [String: Any], keys: [String]) -> Double? {
+        for key in keys {
+            if let value = number(data[key]), let volts = packVolts(value) { return volts }
+        }
+        for key in data.keys.sorted() {
+            let name = key.lowercased()
+            guard name.contains("volt"), !name.contains("status"), !name.contains("flag") else { continue }
+            if let value = number(data[key]), let volts = packVolts(value) { return volts }
+        }
+        return nil
+    }
+
+    private func number(_ any: Any?) -> Double? {
+        if let value = ZeehoJSON.double(any) { return value }
+        let digits = ZeehoJSON.string(any).filter { $0.isNumber || $0 == "." || $0 == "-" }
+        return Double(digits)
+    }
+
+    private func packVolts(_ raw: Double) -> Double? {
+        if raw >= 20, raw <= 200 { return raw }
+        if raw > 200, raw < 2000 {
+            let scaled = raw / 10
+            if scaled >= 20, scaled <= 200 { return scaled }
+        }
+        if raw >= 2000, raw <= 200_000 {
+            let scaled = raw / 1000
+            if scaled >= 20, scaled <= 200 { return scaled }
+        }
+        return nil
+    }
+
+    private func fullMinutes(_ data: [String: Any]) -> Int? {
+        if let minutes = ZeehoJSON.double(data["fullChargeTime"]), minutes > 0 {
+            return Int(minutes.rounded())
+        }
+        guard let seconds = ZeehoJSON.double(data["fullChargeTimeSecond"]), seconds > 0 else { return nil }
+        return Int((seconds / 60).rounded())
+    }
+
+    func fillInbox(token: String, secrets: ZeehoSecrets, status: inout SigninStatus) async {
+        defer { session.finishTasksAndInvalidate() }
+        await attachInbox(token: token, secrets: secrets, status: &status)
+    }
+
+    private func attachInbox(token: String, secrets: ZeehoSecrets, status: inout SigninStatus) async {
+        guard let uid = status.userId, !uid.isEmpty else { return }
+        let query = "messageKind=3&page=1&pageSize=1&userId=\(percent(uid))"
+        let result = await appRequest(
+            method: "GET",
+            urlText: "https://tapi.zeehoev.com/v1.0/mine/cfmotoservermine/app/Message/list_v2?\(query)",
+            token: token,
+            secrets: secrets,
+            query: query
+        )
+        guard ZeehoJSON.isOK(result.json) else { return }
+        let data = ZeehoJSON.object(result.json?["data"])
+        let list = data["messageVOList"] as? [Any]
+        let first = list?.first as? [String: Any]
+        status.unread = ZeehoJSON.int(data["noRead"]) ?? 0
+        status.latestMessage = nonempty(first?["content"]) ?? nonempty(first?["msgTitle"])
+        status.latestMessageId = nonempty(first?["messageId"]) ?? nonempty(first?["id"])
     }
 
     private func chargeLabel(_ raw: String) -> String {
@@ -545,24 +867,63 @@ struct ZeehoClient {
             query: query
         )
         guard ZeehoJSON.isOK(result.json) else { return nil }
-        return ZeehoJSON.object(result.json?["data"])
+        return ZeehoJSON.payload(result.json?["data"])
     }
 
     private func homePage(token: String, vin: String, secrets: ZeehoSecrets) async -> [String: Any]? {
-        let identify = "zeehoios00000001"
-        let query = "uniqueIdentify=\(identify)&phoneDeviceName=ios_\(identify)"
         let result = await appRequest(
             method: "GET",
-            urlText: "https://tapi.zeehoev.com/v1.0/app/cfmotoserverapp/vehicleHomePageV2/\(percent(vin))?\(query)",
+            urlText: "https://tapi.zeehoev.com/v1.0/app/cfmotoserverapp/vehicleHomePageV2/\(percent(vin))",
             token: token,
-            secrets: secrets,
-            query: query
+            secrets: secrets
         )
         guard ZeehoJSON.isOK(result.json) else { return nil }
-        return ZeehoJSON.object(result.json?["data"])
+        return ZeehoJSON.payload(result.json?["data"])
     }
 
-    private func applyRide(home: [String: Any]?, month: [String: Any]?, to vehicle: inout VehicleStatus) {
+    private func applyHome(_ data: [String: Any]?, to vehicle: inout VehicleStatus) {
+        guard let data else { return }
+        if (vehicle.address ?? "").isEmpty {
+            vehicle.address = nonempty(data["address"]) ?? deepString(data, keys: ["address", "formattedAddress", "locationAddress"])
+        }
+        if vehicle.latitude == nil {
+            vehicle.latitude = coordinate(data, keys: ["latitude", "lat", "gpsY", "latitudeValue"], limit: 90)
+        }
+        if vehicle.longitude == nil {
+            vehicle.longitude = coordinate(data, keys: ["longitude", "lng", "lon", "gpsX", "longitudeValue"], limit: 180)
+        }
+        if (vehicle.vehiclePicUrl ?? "").isEmpty {
+            vehicle.vehiclePicUrl = nonempty(data["vehicleScalePicUrl"]) ?? nonempty(data["vehiclePicUrl"])
+        }
+        if (vehicle.lockText ?? "").isEmpty || vehicle.lockText == "未知", data["headLockState"] != nil {
+            vehicle.lockText = VehicleRoster.flagOn(data["headLockState"]) ? "已锁" : "未锁"
+        }
+        if (vehicle.cushionText ?? "").isEmpty { vehicle.cushionText = cushionText(data) }
+        if (vehicle.onlineText ?? "").isEmpty {
+            vehicle.onlineText = nonempty(data["onlineStatus"]) ?? nonempty(data["online"])
+        }
+        if let label = VehicleRoster.onlineLabel(vehicle.onlineText) { vehicle.onlineText = label }
+        if (vehicle.rideState ?? "").isEmpty { vehicle.rideState = nonempty(data["rideState"]) }
+        if (vehicle.signal ?? "").isEmpty { vehicle.signal = nonempty(data["gsmRxLevValue"]) }
+        if (vehicle.otaVersion ?? "").isEmpty {
+            vehicle.otaVersion = nonempty(data["otaVersion"]) ?? nonempty(data["softwareVersion"])
+        }
+        if (vehicle.locationTime ?? "").isEmpty {
+            let location = ZeehoJSON.object(data["location"])
+            vehicle.locationTime = nonempty(location["locationTime"]) ?? nonempty(data["locationTime"])
+        }
+        if vehicle.mileageKm == nil { vehicle.mileageKm = ZeehoJSON.double(data["totalRideMile"]) }
+        if vehicle.rangeKm == nil { vehicle.rangeKm = ZeehoJSON.int(data["hmiRidableMile"]) }
+        applyCharge(data, to: &vehicle)
+        if (vehicle.pressureText ?? "").isEmpty {
+            if let bar = ZeehoJSON.double(data["pressure"] ?? data["frontTirePressure"]), bar > 0.05 {
+                vehicle.pressureText = String(format: "%.1f", bar)
+                vehicle.frontBar = bar
+            }
+        }
+    }
+
+    private func applyRide(home: [String: Any]?, ride: [String: Any]?, month: [String: Any]?, to vehicle: inout VehicleStatus) {
         let todayKey = ZeehoClock.todayString()
         let records = (month?["rideRecordList"] as? [Any])?.compactMap { $0 as? [String: Any] } ?? []
         let today = records.first { dayKey($0["date"]) == todayKey }
@@ -574,11 +935,14 @@ struct ZeehoClient {
         vehicle.todayRideText = todayParts.joined(separator: " · ")
 
         var lastParts: [String] = []
-        if let distance = ZeehoJSON.double(home?["lastRideMileage"]) {
-            lastParts.append(String(format: "%.1f km", distance))
-        }
-        if let minutes = ZeehoJSON.int(home?["lastRidingTimeUnitMinute"]) {
-            lastParts.append("\(minutes) 分钟")
+        for source in [home, ride].compactMap({ $0 }) {
+            if !lastParts.isEmpty { break }
+            if let distance = ZeehoJSON.double(source["lastRideMileage"] ?? source["rideMileage"]) {
+                lastParts.append(String(format: "%.1f km", distance))
+            }
+            if let minutes = ZeehoJSON.int(source["lastRidingTimeUnitMinute"] ?? source["ridingTimeUnitMinute"]) {
+                lastParts.append("\(minutes) 分钟")
+            }
         }
         if !lastParts.isEmpty { vehicle.lastRideText = lastParts.joined(separator: " · ") }
         if vehicle.mileageKm == nil, let total = ZeehoJSON.double(month?["rideMileageTotal"]) {
@@ -670,6 +1034,86 @@ struct ZeehoClient {
         return Array(NSOrderedSet(array: values)) as? [String] ?? values
     }
 
+    private func tapi(
+        method: String,
+        path: String,
+        token: String,
+        secrets: ZeehoSecrets,
+        query: String = "",
+        body: String = ""
+    ) async -> HTTPResult {
+        let url = query.isEmpty ? "https://tapi.zeehoev.com\(path)" : "https://tapi.zeehoev.com\(path)?\(query)"
+        return await appRequest(method: method, urlText: url, token: token, secrets: secrets, query: query, body: body)
+    }
+
+    private func publishPost(token: String, secrets: ZeehoSecrets, content: String, userId: String, notes: inout String) async -> String {
+        let text = content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "今日打卡" : content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = "{\"postSubInfo\":{\"topicList\":[]},\"topicid\":\"\",\"postcontent\":\(jsonQuote(text))}"
+        let posted = await tapi(method: "POST", path: "/v1.0/social/cfmotoserversocial/commonArticle", token: token, secrets: secrets, body: body)
+        guard ZeehoJSON.isOK(posted.json) else {
+            notes += "；发帖失败：\(failureText(posted))"
+            return ""
+        }
+        let id = await myFirstPost(token: token, userId: userId, secrets: secrets)
+        if id.isEmpty { notes += "；发帖成功但取不到动态 ID" }
+        return id
+    }
+
+    private func myFirstPost(token: String, userId: String, secrets: ZeehoSecrets) async -> String {
+        let listed = await tapi(
+            method: "GET",
+            path: "/v1.0/social/cfmotoserversocial/community/mineArticleInfo",
+            token: token,
+            secrets: secrets,
+            query: "userId=\(percent(userId))"
+        )
+        guard ZeehoJSON.isOK(listed.json) else { return "" }
+        let data = listed.json?["data"]
+        var first: [String: Any]?
+        if let list = data as? [Any] {
+            first = list.first as? [String: Any]
+        } else if let dict = data as? [String: Any] {
+            let nested = (dict["list"] as? [Any]) ?? (dict["records"] as? [Any]) ?? []
+            first = nested.first as? [String: Any]
+        } else {
+            first = nil
+        }
+        guard let first else { return "" }
+        return nonempty(first["tuuid"]) ?? nonempty(first["id"]) ?? nonempty(first["articleId"]) ?? ""
+    }
+
+    private func pointsAction(_ code: String) -> String {
+        switch code {
+        case "1023": return "post"
+        case "1026": return "like"
+        case "1024": return "share"
+        default: return ""
+        }
+    }
+
+    private func jsonQuote(_ text: String) -> String {
+        var out = "\""
+        for scalar in text.unicodeScalars {
+            switch scalar.value {
+            case 0x5C: out += "\\\\"
+            case 0x22: out += "\\\""
+            case 0x0A: out += "\\n"
+            case 0x0D: out += "\\r"
+            case 0x09: out += "\\t"
+            default: out.unicodeScalars.append(scalar)
+            }
+        }
+        out += "\""
+        return out
+    }
+
+    private func failureText(_ result: HTTPResult) -> String {
+        let message = ZeehoJSON.message(result.json)
+        if !message.isEmpty { return message }
+        if let error = result.error, !error.isEmpty { return error }
+        return "HTTP \(result.status)"
+    }
+
     private func percent(_ text: String) -> String {
         var allowed = CharacterSet.alphanumerics
         allowed.insert(charactersIn: "-._~")
@@ -755,6 +1199,13 @@ struct ZeehoClient {
         if merged.lockText == nil || merged.lockText == "未知" { merged.lockText = extra.lockText }
         if merged.chargeText == nil || merged.chargeText == "未知" { merged.chargeText = extra.chargeText }
         if merged.voltageText == nil { merged.voltageText = extra.voltageText }
+        if merged.currentText == nil { merged.currentText = extra.currentText }
+        if merged.powerText == nil { merged.powerText = extra.powerText }
+        if merged.etaText == nil { merged.etaText = extra.etaText }
+        if merged.chargedText == nil { merged.chargedText = extra.chargedText }
+        if merged.frontBar == nil { merged.frontBar = extra.frontBar }
+        if merged.rearBar == nil { merged.rearBar = extra.rearBar }
+        merged.tireWarn = merged.tireWarn || extra.tireWarn
         if merged.cushionText == nil { merged.cushionText = extra.cushionText }
         if merged.onlineText == nil { merged.onlineText = extra.onlineText }
         if merged.todayRideText == nil { merged.todayRideText = extra.todayRideText }
@@ -857,8 +1308,7 @@ struct ZeehoClient {
     }
 
     private func voltageText(_ vehicle: [String: Any]) -> String? {
-        let value = ZeehoJSON.double(vehicle["voltage"] ?? vehicle["batteryVoltage"] ?? vehicle["bmsVoltage"] ?? vehicle["totalVoltage"])
-        guard let value, value > 0 else { return nil }
+        guard let value = chargeVolts(vehicle), value > 0 else { return nil }
         return String(format: "%.1f V", value)
     }
 

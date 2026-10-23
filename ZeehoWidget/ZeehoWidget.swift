@@ -34,6 +34,8 @@ struct ZeehoWidgetIntent: WidgetConfigurationIntent {
     @Parameter(title: "地址", default: false) var address: Bool
     @Parameter(title: "信号", default: false) var signal: Bool
     @Parameter(title: "电压", default: false) var voltage: Bool
+    @Parameter(title: "功率", default: false) var power: Bool
+    @Parameter(title: "充满", default: false) var eta: Bool
     @Parameter(title: "今日骑行", default: false) var ride: Bool
     @Parameter(title: "寻车", default: true) var findButton: Bool
     @Parameter(title: "鸣笛", default: true) var hornButton: Bool
@@ -52,6 +54,8 @@ struct ZeehoWidgetIntent: WidgetConfigurationIntent {
             address: address,
             signal: signal,
             voltage: voltage,
+            power: power,
+            eta: eta,
             ride: ride
         )
     }
@@ -72,6 +76,7 @@ struct ZeehoEntry: TimelineEntry {
     var status: SigninStatus
     var fields: ZeehoWidgetFields = ZeehoWidgetFields()
     var actions: ZeehoWidgetActions = ZeehoWidgetActions()
+    var avatars: [String: Data] = [:]
 }
 
 struct ZeehoProvider: AppIntentTimelineProvider {
@@ -80,22 +85,28 @@ struct ZeehoProvider: AppIntentTimelineProvider {
     }
 
     func snapshot(for configuration: ZeehoWidgetIntent, in context: Context) async -> ZeehoEntry {
-        ZeehoEntry(date: Date(), status: ZeehoFiles.loadStatus() ?? .missingToken(), fields: configuration.fields, actions: configuration.actions)
+        let status = ZeehoFiles.loadStatus() ?? .missingToken()
+        let avatars = await ZeehoFiles.ensureAvatars(status)
+        return ZeehoEntry(date: Date(), status: status, fields: configuration.fields, actions: configuration.actions, avatars: avatars)
     }
 
     func timeline(for configuration: ZeehoWidgetIntent, in context: Context) async -> Timeline<ZeehoEntry> {
-        let status = await ZeehoEngine.refresh(ignoreGate: false)
-        return Self.timeline(status: status, fields: configuration.fields, actions: configuration.actions, now: Date())
+        let signed = await ZeehoEngine.refresh(ignoreGate: false)
+        let watched = await ZeehoEngine.watchIfDue()
+        let status = (watched.updatedAtUnix ?? 0) > (signed.updatedAtUnix ?? 0) ? watched : signed
+        let avatars = await ZeehoFiles.ensureAvatars(status)
+        return Self.timeline(status: status, fields: configuration.fields, actions: configuration.actions, avatars: avatars, now: Date())
     }
 
-    static func timeline(status: SigninStatus, fields: ZeehoWidgetFields, actions: ZeehoWidgetActions = ZeehoWidgetActions(), now: Date) -> Timeline<ZeehoEntry> {
-        var entries = [ZeehoEntry(date: now, status: status, fields: fields, actions: actions)]
+    static func timeline(status: SigninStatus, fields: ZeehoWidgetFields, actions: ZeehoWidgetActions = ZeehoWidgetActions(), avatars: [String: Data] = [:], now: Date) -> Timeline<ZeehoEntry> {
+        var entries = [ZeehoEntry(date: now, status: status, fields: fields, actions: actions, avatars: avatars)]
         if status.signedToday == true,
            status.today == ZeehoClock.todayString(now),
            let midnight = ZeehoClock.nextMidnight(after: now) {
-            entries.append(ZeehoEntry(date: midnight, status: status.markedUnsigned(at: midnight), fields: fields, actions: actions))
+            entries.append(ZeehoEntry(date: midnight, status: status.markedUnsigned(at: midnight), fields: fields, actions: actions, avatars: avatars))
         }
-        return Timeline(entries: entries, policy: .after(ZeehoScheduler.nextRefresh(after: now, status: status)))
+        let when = ZeehoScheduler.nextRefresh(after: now, status: status)
+        return Timeline(entries: entries, policy: .after(when))
     }
 }
 
@@ -105,7 +116,7 @@ struct ZeehoSignInWidget: Widget {
             ZeehoWidgetEntryView(entry: entry)
         }
         .configurationDisplayName("极核签到")
-        .description("显示签到和你勾选的车辆信息。长按小组件可以改显示项。还没签到时，刷新会自动打卡。")
+        .description("显示签到和车辆。显示项、按钮和车辆在 App 里选。还没签到时，刷新会自动打卡。")
         .supportedFamilies([
             .systemSmall,
             .systemMedium,
@@ -132,11 +143,11 @@ struct ZeehoWidgetEntryView: View {
     var body: some View {
         switch family {
         case .systemSmall:
-            small.padding(14).containerBackground(ZeehoTheme.surface, for: .widget)
+            small.padding(14).containerBackground(for: .widget) { widgetBackdrop }
         case .systemMedium:
-            medium.padding(14).containerBackground(ZeehoTheme.surface, for: .widget)
+            medium.padding(14).containerBackground(for: .widget) { widgetBackdrop }
         case .systemLarge:
-            large.padding(16).containerBackground(ZeehoTheme.surface, for: .widget)
+            large.padding(16).containerBackground(for: .widget) { widgetBackdrop }
         case .accessoryCircular:
             circular
         case .accessoryRectangular:
@@ -146,13 +157,25 @@ struct ZeehoWidgetEntryView: View {
         }
     }
 
+    private var widgetBackdrop: some View {
+        ZStack {
+            ZeehoTheme.widgetBackground
+            if ZeehoSkinStore.current().useImage, let data = ZeehoSkinStore.imageData(), let image = UIImage(data: data) {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                Color.black.opacity(0.35)
+            }
+        }
+    }
+
     private var small: some View {
         VStack(alignment: .leading, spacing: 6) {
             header(showsAction: false)
             Spacer(minLength: 0)
             if entry.status.accountRows.count > 1 {
                 accountBlock(limit: 3, showsContinue: false, preferColumns: false)
-                vehicleBlock(factLimit: 3, tiled: false)
+                vehicleBlock(factLimit: 6, tiled: false)
             } else {
                 Text(entry.status.pointsText)
                     .font(.system(size: 32, weight: .regular))
@@ -183,18 +206,24 @@ struct ZeehoWidgetEntryView: View {
             if let vehicle = factVehicles.first {
                 ridePlace(vehicle)
             }
-                factsView(limit: 3)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
     }
 
     private var medium: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
             header(showsAction: true)
+            if let problem = entry.status.problemText {
+                Text(problem)
+                    .font(ZeehoFont.labelSmall)
+                    .foregroundStyle(ZeehoTheme.onErrorContainer)
+                    .lineLimit(1)
+            }
             if entry.status.accountRows.count > 1 {
                 accountBlock(limit: 3, showsContinue: true, preferColumns: true)
-                vehicleBlock(factLimit: 3, tiled: true, roomy: false)
+                vehicleBlock(factLimit: 6, tiled: true, roomy: false)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             } else {
                 HStack(alignment: .firstTextBaseline) {
                     Text(entry.status.pointsText)
@@ -215,29 +244,31 @@ struct ZeehoWidgetEntryView: View {
                     mini("上次", entry.status.lastTimeText)
                 }
                 if let vehicle = factVehicles.first {
-                    vehiclePanel(vehicle, factLimit: 3, roomy: false)
+                    vehiclePanel(vehicle, factLimit: 6, roomy: false)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 }
             }
-            if let problem = entry.status.problemText {
-                Text(problem)
-                    .font(ZeehoFont.labelSmall)
-                    .foregroundStyle(ZeehoTheme.onErrorContainer)
-                    .lineLimit(1)
-            }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var large: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
             header(showsAction: true)
             Text(entry.status.displayTitle)
-                .font(.system(size: 17, weight: .medium))
+                .font(.system(size: entry.status.accountRows.count > 1 ? 12 : 15, weight: .medium))
                 .foregroundStyle(ZeehoTheme.onSurface)
                 .lineLimit(1)
+            if let problem = entry.status.problemText {
+                Text(problem)
+                    .font(ZeehoFont.bodySmall)
+                    .foregroundStyle(ZeehoTheme.onErrorContainer)
+                    .lineLimit(2)
+            }
             if entry.status.accountRows.count > 1 {
                 accountBlock(limit: 4, showsContinue: true, preferColumns: true)
                 vehicleBlock(factLimit: 6, tiled: true, roomy: true)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             } else {
                 if let name = entry.status.nickName, !name.isEmpty {
                     Text(name)
@@ -260,18 +291,12 @@ struct ZeehoWidgetEntryView: View {
                     mini("上次", entry.status.lastTimeText)
                 }
                 if let vehicle = factVehicles.first {
-                    vehiclePanel(vehicle, factLimit: 3, roomy: true)
+                    vehiclePanel(vehicle, factLimit: 6, roomy: true)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 }
             }
-            if let problem = entry.status.problemText {
-                Text(problem)
-                    .font(ZeehoFont.bodySmall)
-                    .foregroundStyle(ZeehoTheme.onErrorContainer)
-                    .lineLimit(2)
-            }
-            Spacer(minLength: 0)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var circular: some View {
@@ -317,6 +342,18 @@ struct ZeehoWidgetEntryView: View {
             freshness
             Spacer(minLength: 4)
             chip
+            if let hint = ZeehoFiles.pointsHint(entry.status) {
+                Text(hint.title)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(hint.done ? ZeehoTheme.onPrimaryContainer : ZeehoTheme.onTertiaryContainer)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(
+                        hint.done ? ZeehoTheme.primaryContainer : ZeehoTheme.tertiaryContainer,
+                        in: Capsule()
+                    )
+                    .lineLimit(1)
+            }
             if showsAction {
                 action
             }
@@ -400,94 +437,23 @@ struct ZeehoWidgetEntryView: View {
     }
 
     private var factVehicles: [VehicleStatus] {
-        let rows = entry.status.accountRows.flatMap(\.shownVehicles)
-        let source: [VehicleStatus]
-        if !rows.isEmpty {
-            source = rows
-        } else if let vehicle = entry.status.vehicle {
-            source = [vehicle]
-        } else {
-            source = []
-        }
-        var unique: [VehicleStatus] = []
-        for vehicle in source {
-            if let index = unique.firstIndex(where: { sameVehicle($0, vehicle) }) {
-                unique[index] = fill(unique[index], with: vehicle)
-            } else {
-                unique.append(vehicle)
-            }
-        }
-        return unique
-    }
-
-    private func sameVehicle(_ lhs: VehicleStatus, _ rhs: VehicleStatus) -> Bool {
-        let leftVin = normalized(lhs.vin)
-        let rightVin = normalized(rhs.vin)
-        if !leftVin.isEmpty, !rightVin.isEmpty { return leftVin == rightVin }
-        let leftName = lhs.titleText
-        let rightName = rhs.titleText
-        return leftName != "车辆" && leftName == rightName
-    }
-
-    private func normalized(_ text: String?) -> String {
-        (text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    }
-
-    private func fill(_ base: VehicleStatus, with extra: VehicleStatus) -> VehicleStatus {
-        var vehicle = base
-        if normalized(vehicle.vehicleName).isEmpty { vehicle.vehicleName = extra.vehicleName }
-        if vehicle.battery == nil { vehicle.battery = extra.battery }
-        if vehicle.rangeKm == nil { vehicle.rangeKm = extra.rangeKm }
-        if vehicle.mileageKm == nil { vehicle.mileageKm = extra.mileageKm }
-        if normalized(vehicle.lockText).isEmpty { vehicle.lockText = extra.lockText }
-        if normalized(vehicle.chargeText).isEmpty || vehicle.chargeText == "未知" { vehicle.chargeText = extra.chargeText }
-        if normalized(vehicle.signal).isEmpty { vehicle.signal = extra.signal }
-        if normalized(vehicle.address).isEmpty { vehicle.address = extra.address }
-        if normalized(vehicle.pressureText).isEmpty { vehicle.pressureText = extra.pressureText }
-        if normalized(vehicle.voltageText).isEmpty { vehicle.voltageText = extra.voltageText }
-        if normalized(vehicle.todayRideText).isEmpty { vehicle.todayRideText = extra.todayRideText }
-        if normalized(vehicle.lastRideText).isEmpty { vehicle.lastRideText = extra.lastRideText }
-        if normalized(vehicle.vin).isEmpty { vehicle.vin = extra.vin }
-        return vehicle
-    }
-
-    private func factsView(limit: Int) -> some View {
-        let lines = factVehicles.flatMap { vehicle -> [(String, String)] in
-            let rows = entry.fields.lines(for: vehicle).filter { $0.0 != "今日骑行" && $0.0 != "地址" && $0.0 != "充电" }
-            if factVehicles.count > 1, !rows.isEmpty {
-                return [(vehicle.titleText, rows.map(\.1).joined(separator: " · "))]
-            }
-            return rows
-        }
-        return VStack(alignment: .leading, spacing: 4) {
-            ForEach(Array(lines.prefix(limit).enumerated()), id: \.offset) { _, line in
-                HStack(spacing: 6) {
-                    Text(line.0)
-                        .font(ZeehoFont.labelSmall)
-                        .foregroundStyle(ZeehoTheme.onSurfaceVariant)
-                        .lineLimit(1)
-                    Text(line.1)
-                        .font(ZeehoFont.labelLarge)
-                        .foregroundStyle(ZeehoTheme.onSurface)
-                        .lineLimit(2)
-                        .minimumScaleFactor(0.65)
-                    Spacer(minLength: 0)
-                }
-            }
-        }
+        let all = VehicleRoster.all(entry.status)
+        if all.count <= 1 { return all }
+        let saved = ZeehoFiles.loadWidgetConfig().vehicleKey
+        return [all.first { VehicleRoster.key($0) == saved } ?? all[0]]
     }
 
     @ViewBuilder
     private func accountBlock(limit: Int, showsContinue: Bool, preferColumns: Bool) -> some View {
         let rows = Array(entry.status.accountRows.prefix(limit))
         if preferColumns, rows.count == 2 {
-            HStack(alignment: .top, spacing: 8) {
+            HStack(alignment: .top, spacing: 6) {
                 ForEach(rows) { row in
                     accountTile(row, showsContinue: showsContinue)
                 }
             }
         } else {
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 3) {
                 ForEach(rows) { row in
                     accountLine(row, showsContinue: showsContinue)
                 }
@@ -496,62 +462,61 @@ struct ZeehoWidgetEntryView: View {
     }
 
     private func accountLine(_ row: AccountSignin, showsContinue: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            HStack(spacing: 6) {
-                statusChip(row)
-                Text(accountTitle(row, among: entry.status.accountRows))
-                    .font(ZeehoFont.labelLarge)
-                    .foregroundStyle(ZeehoTheme.onSurface)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.6)
-                if showsContinue {
-                    Text(row.continueText)
-                        .font(ZeehoFont.labelSmall)
-                        .foregroundStyle(ZeehoTheme.onSurfaceVariant)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 4)
-                Text(row.pointsText)
-                    .font(ZeehoFont.labelLarge)
-                    .monospacedDigit()
-                    .foregroundStyle(ZeehoTheme.onPrimaryContainer)
+        HStack(spacing: 4) {
+            accountAvatar(row.id, side: 16)
+            statusChip(row)
+            Text(accountTitle(row, among: entry.status.accountRows))
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(ZeehoTheme.onSurface)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+            if showsContinue {
+                Text(row.continueText)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(ZeehoTheme.onSurfaceVariant)
                     .lineLimit(1)
             }
+            Spacer(minLength: 2)
             if let time = signedAt(row.lastTime) {
                 Text(time)
-                    .font(ZeehoFont.labelSmall)
+                    .font(.system(size: 10, weight: .medium))
                     .monospacedDigit()
                     .foregroundStyle(ZeehoTheme.onSurfaceVariant)
                     .lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
             }
+            Text(row.pointsText)
+                .font(.system(size: 12, weight: .medium))
+                .monospacedDigit()
+                .foregroundStyle(ZeehoTheme.onPrimaryContainer)
+                .lineLimit(1)
         }
     }
 
     private func accountTile(_ row: AccountSignin, showsContinue: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 1) {
             HStack(spacing: 4) {
+                accountAvatar(row.id, side: 18)
                 Text(accountTitle(row, among: entry.status.accountRows))
-                    .font(.system(size: 14, weight: .medium))
+                    .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(ZeehoTheme.onSurface)
                     .lineLimit(1)
                     .minimumScaleFactor(0.6)
-                Spacer(minLength: 0)
+                Spacer(minLength: 2)
+                Text(row.pointsText)
+                    .font(.system(size: 13, weight: .medium))
+                    .monospacedDigit()
+                    .foregroundStyle(ZeehoTheme.onPrimaryContainer)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
                 statusChip(row)
             }
-            Text(row.pointsText)
-                .font(.system(size: 18, weight: .regular))
-                .monospacedDigit()
-                .foregroundStyle(ZeehoTheme.onPrimaryContainer)
-                .lineLimit(1)
-                .minimumScaleFactor(0.6)
             if showsContinue || signedAt(row.lastTime) != nil {
                 HStack(spacing: 4) {
                     if showsContinue {
                         Text("连签 \(row.continueText)")
                             .lineLimit(1)
                     }
-                    Spacer(minLength: 4)
+                    Spacer(minLength: 2)
                     if let time = signedAt(row.lastTime) {
                         Text(time)
                             .monospacedDigit()
@@ -559,13 +524,41 @@ struct ZeehoWidgetEntryView: View {
                             .minimumScaleFactor(0.7)
                     }
                 }
-                .font(ZeehoFont.labelSmall)
+                .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(ZeehoTheme.onSurfaceVariant)
             }
         }
-        .padding(6)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(ZeehoTheme.surfaceContainerHigh, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(ZeehoTheme.widgetItem, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private func accountAvatar(_ id: String, side: CGFloat) -> some View {
+        let data = entry.avatars[id] ?? ZeehoFiles.avatarData(id: id)
+        return Group {
+            if let data, let image = UIImage(data: data) {
+                avatarImage(image, side: side)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func avatarImage(_ image: UIImage, side: CGFloat) -> some View {
+        if #available(iOS 18, *) {
+            Image(uiImage: image)
+                .resizable()
+                .widgetAccentedRenderingMode(.fullColor)
+                .scaledToFill()
+                .frame(width: side, height: side)
+                .clipShape(Circle())
+        } else {
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFill()
+                .frame(width: side, height: side)
+                .clipShape(Circle())
+        }
     }
 
     private func signedAt(_ raw: String?) -> String? {
@@ -594,10 +587,10 @@ struct ZeehoWidgetEntryView: View {
             fill = ZeehoTheme.tertiaryContainer
         }
         return Text(row.chip)
-            .font(.system(size: 10, weight: .semibold))
+            .font(.system(size: 9, weight: .semibold))
             .foregroundStyle(ink)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
             .background(fill, in: Capsule())
     }
 
@@ -628,21 +621,42 @@ struct ZeehoWidgetEntryView: View {
             vehicleHead(vehicle, roomy: roomy)
             todayLine(vehicle)
             placeLine(vehicle)
-            let extra = Array(metricLines(for: vehicle).prefix(min(3, factLimit)))
-            if !extra.isEmpty {
-                HStack(spacing: 6) {
-                    ForEach(Array(extra.enumerated()), id: \.offset) { _, line in
-                        mini(line.0, line.1)
-                    }
-                }
-            }
+            factGrid(vehicle, limit: factLimit, expands: true)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             controlRow(vehicle, roomy: roomy)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
-    private func metricLines(for vehicle: VehicleStatus) -> [(String, String)] {
-        entry.fields.lines(for: vehicle).filter { line in
-            line.0 != "今日骑行" && line.0 != "地址" && line.0 != "充电" && line.0 != "电量" && line.0 != "续航" && line.0 != "车锁"
+    @ViewBuilder
+    private func factGrid(_ vehicle: VehicleStatus, limit: Int, expands: Bool = false) -> some View {
+        let facts = Array(ZeehoFiles.loadWidgetConfig().shownFacts.prefix(limit))
+        if facts.isEmpty {
+            if expands {
+                Spacer(minLength: 0)
+            }
+        } else {
+            let columns = ZeehoWidgetFact.columns
+            let rows = stride(from: 0, to: facts.count, by: columns).map {
+                Array(facts[$0..<min($0 + columns, facts.count)])
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                    HStack(spacing: 4) {
+                        ForEach(row, id: \.rawValue) { fact in
+                            mini(fact.title, fact.text(vehicle), fills: expands)
+                        }
+                        if expands, row.count < columns {
+                            ForEach(0..<(columns - row.count), id: \.self) { _ in
+                                Color.clear
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: expands ? .infinity : nil)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: expands ? .infinity : nil)
         }
     }
 
@@ -657,17 +671,13 @@ struct ZeehoWidgetEntryView: View {
             lockMark(vehicle)
             chargeChip(vehicle)
             Spacer(minLength: 4)
-            if entry.fields.battery {
-                headStat(vehicle.batteryText, "电量")
-            }
-            if entry.fields.range {
-                headStat(vehicle.rangeText, "续航")
-            }
+            headStat(vehicle.batteryText, "电量")
+            headStat(vehicle.rangeText, "预估里程")
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(ZeehoTheme.surfaceContainerHigh, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(ZeehoTheme.widgetItem, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     private func headStat(_ value: String, _ label: String) -> some View {
@@ -708,7 +718,7 @@ struct ZeehoWidgetEntryView: View {
         }
         .frame(width: side, height: side)
         .padding(4)
-        .background(ZeehoTheme.surfaceContainerHighest, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(ZeehoTheme.widgetItem, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     @ViewBuilder
@@ -716,6 +726,7 @@ struct ZeehoWidgetEntryView: View {
         VStack(alignment: .leading, spacing: 4) {
             todayLine(vehicle)
             placeLine(vehicle)
+            factGrid(vehicle, limit: ZeehoWidgetFact.limit)
         }
     }
 
@@ -743,7 +754,7 @@ struct ZeehoWidgetEntryView: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(ZeehoTheme.surfaceContainerHigh, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(ZeehoTheme.widgetItem, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
     private func chargeChip(_ vehicle: VehicleStatus) -> some View {
@@ -773,7 +784,7 @@ struct ZeehoWidgetEntryView: View {
 
     @ViewBuilder
     private func controlRow(_ vehicle: VehicleStatus, roomy: Bool) -> some View {
-        let actions = entry.actions.enabled
+        let actions = ZeehoFiles.loadWidgetConfig().shownActions
         if !actions.isEmpty, let vin = vehicle.vin, !vin.isEmpty, let accountId = vehicle.accountId, !accountId.isEmpty {
             HStack(spacing: 6) {
                 ForEach(Array(actions.prefix(3))) { action in
@@ -804,21 +815,22 @@ struct ZeehoWidgetEntryView: View {
         return "\(name) \(index + 1)"
     }
 
-    private func mini(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+    private func mini(_ label: String, _ value: String, fills: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
             Text(label)
-                .font(ZeehoFont.labelSmall)
+                .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(ZeehoTheme.onSurfaceVariant)
+                .lineLimit(1)
             Text(value)
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 12, weight: .medium))
                 .monospacedDigit()
                 .foregroundStyle(ZeehoTheme.onSurface)
                 .lineLimit(1)
                 .minimumScaleFactor(0.6)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .background(ZeehoTheme.surfaceContainerHigh, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .frame(maxWidth: .infinity, maxHeight: fills ? .infinity : nil, alignment: .leading)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(ZeehoTheme.widgetItem, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }

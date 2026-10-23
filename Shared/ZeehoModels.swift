@@ -8,6 +8,10 @@ struct VehicleStatus: Codable, Equatable, Sendable {
     var mileageKm: Double?
     var lockText: String?
     var chargeText: String?
+    var currentText: String?
+    var powerText: String?
+    var etaText: String?
+    var chargedText: String?
     var rideState: String?
     var signal: String?
     var locationTime: String?
@@ -22,6 +26,9 @@ struct VehicleStatus: Codable, Equatable, Sendable {
     var lastRideText: String?
     var latitude: Double?
     var longitude: Double?
+    var frontBar: Double?
+    var rearBar: Double?
+    var tireWarn: Bool = false
     var accountId: String?
 
     var mileageText: String {
@@ -67,6 +74,242 @@ struct VehicleStatus: Codable, Equatable, Sendable {
             .replacingOccurrences(of: "  ", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
+
+    var onlineDisplay: String {
+        VehicleRoster.onlineLabel(onlineText) ?? "—"
+    }
+}
+
+enum VehicleRoster {
+    static func all(_ status: SigninStatus) -> [VehicleStatus] {
+        let rows = status.accountRows.flatMap(\.shownVehicles)
+        let source: [VehicleStatus]
+        if !rows.isEmpty {
+            source = rows
+        } else if let vehicles = status.vehicles, !vehicles.isEmpty {
+            source = vehicles
+        } else if let vehicle = status.vehicle {
+            source = [vehicle]
+        } else {
+            source = []
+        }
+        return distinct(source)
+    }
+
+    static func distinct(_ source: [VehicleStatus]) -> [VehicleStatus] {
+        var unique: [VehicleStatus] = []
+        for vehicle in source {
+            if let index = unique.firstIndex(where: { same($0, vehicle) }) {
+                unique[index] = merge(unique[index], vehicle)
+            } else {
+                unique.append(vehicle)
+            }
+        }
+        return unique
+    }
+
+    static func same(_ lhs: VehicleStatus, _ rhs: VehicleStatus) -> Bool {
+        let leftVin = vinKey(lhs.vin)
+        let rightVin = vinKey(rhs.vin)
+        if !leftVin.isEmpty, !rightVin.isEmpty, leftVin == rightVin { return true }
+        let leftName = nameKey(lhs.titleText)
+        let rightName = nameKey(rhs.titleText)
+        return !leftName.isEmpty && leftName != "车辆" && leftName == rightName
+    }
+
+    private static func vinKey(_ vin: String?) -> String {
+        (vin ?? "").uppercased().filter { $0.isLetter || $0.isNumber }
+    }
+
+    private static func nameKey(_ name: String) -> String {
+        name.lowercased().filter { $0.isLetter || $0.isNumber }
+    }
+
+    static func key(_ vehicle: VehicleStatus) -> String {
+        let vin = vehicle.vin?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !vin.isEmpty { return "vin:\(vin)" }
+        return "account:\(vehicle.accountId ?? "")"
+    }
+
+    static func caption(_ status: SigninStatus, _ vehicle: VehicleStatus) -> String {
+        let account = status.accountRows.first { $0.id == vehicle.accountId }?.displayName
+        let name = vehicle.titleText
+        if let account, !account.isEmpty, account != name { return "\(account) · \(name)" }
+        return name
+    }
+
+    static func merge(_ base: VehicleStatus, _ extra: VehicleStatus) -> VehicleStatus {
+        var vehicle = score(extra) > score(base) ? extra : base
+        let other = score(extra) > score(base) ? base : extra
+        func pick(_ a: String?, _ b: String?) -> String? {
+            let left = a?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !left.isEmpty { return left }
+            let right = b?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return right.isEmpty ? nil : right
+        }
+        vehicle.vehicleName = pick(vehicle.vehicleName, other.vehicleName)
+        vehicle.vehiclePicUrl = pick(vehicle.vehiclePicUrl, other.vehiclePicUrl)
+        vehicle.lockText = preferKnown(vehicle.lockText, other.lockText)
+        vehicle.chargeText = preferKnown(vehicle.chargeText, other.chargeText)
+        vehicle.rideState = pick(vehicle.rideState, other.rideState)
+        vehicle.signal = pick(vehicle.signal, other.signal)
+        vehicle.locationTime = pick(vehicle.locationTime, other.locationTime)
+        vehicle.address = pick(vehicle.address, other.address)
+        vehicle.pressureText = pick(vehicle.pressureText, other.pressureText)
+        vehicle.otaVersion = pick(vehicle.otaVersion, other.otaVersion)
+        vehicle.vin = pick(vehicle.vin, other.vin)
+        vehicle.voltageText = pick(vehicle.voltageText, other.voltageText)
+        vehicle.cushionText = preferKnown(vehicle.cushionText, other.cushionText)
+        vehicle.onlineText = pick(vehicle.onlineText, other.onlineText)
+        vehicle.todayRideText = pick(vehicle.todayRideText, other.todayRideText)
+        vehicle.lastRideText = pick(vehicle.lastRideText, other.lastRideText)
+        vehicle.powerText = pick(vehicle.powerText, other.powerText)
+        vehicle.currentText = pick(vehicle.currentText, other.currentText)
+        vehicle.etaText = pick(vehicle.etaText, other.etaText)
+        vehicle.chargedText = pick(vehicle.chargedText, other.chargedText)
+        if vehicle.battery == nil { vehicle.battery = other.battery }
+        if vehicle.rangeKm == nil { vehicle.rangeKm = other.rangeKm }
+        if vehicle.mileageKm == nil { vehicle.mileageKm = other.mileageKm }
+        if vehicle.latitude == nil { vehicle.latitude = other.latitude }
+        if vehicle.longitude == nil { vehicle.longitude = other.longitude }
+        if vehicle.frontBar == nil { vehicle.frontBar = other.frontBar }
+        if vehicle.rearBar == nil { vehicle.rearBar = other.rearBar }
+        if (vehicle.accountId ?? "").isEmpty { vehicle.accountId = other.accountId }
+        vehicle.tireWarn = vehicle.tireWarn || other.tireWarn
+        return vehicle
+    }
+
+    static func onlineLabel(_ raw: String?) -> String? {
+        let text = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if text.isEmpty { return nil }
+        if flagOn(text) || text.uppercased() == "ONLINE" || text.contains("在线") { return "在线" }
+        if text.uppercased() == "OFFLINE" || text.contains("离线") { return "离线" }
+        return text
+    }
+
+    static func flagOn(_ any: Any?) -> Bool {
+        let text = ZeehoJSON.string(any).trimmingCharacters(in: .whitespacesAndNewlines)
+        return text == "1" || text.lowercased() == "true" || text.uppercased() == "ONLINE"
+    }
+
+    static func minutesLabel(_ minutes: Int) -> String? {
+        guard minutes > 0 else { return nil }
+        let hours = minutes / 60
+        let rest = minutes % 60
+        if hours > 0, rest > 0 { return "\(hours)小时\(rest)分" }
+        if hours > 0 { return "\(hours)小时" }
+        return "\(rest)分钟"
+    }
+
+    private static func preferKnown(_ primary: String?, _ secondary: String?) -> String? {
+        let a = primary?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let b = secondary?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !a.isEmpty, a != "未知" { return a }
+        if !b.isEmpty, b != "未知" { return b }
+        if !a.isEmpty { return a }
+        return b.isEmpty ? nil : b
+    }
+
+    private static func score(_ vehicle: VehicleStatus) -> Int {
+        var n = 0
+        if vehicle.battery != nil { n += 2 }
+        if vehicle.rangeKm != nil { n += 1 }
+        if vehicle.mileageKm != nil { n += 1 }
+        if !(vehicle.voltageText ?? "").isEmpty { n += 1 }
+        if !(vehicle.pressureText ?? "").isEmpty { n += 1 }
+        if !(vehicle.address ?? "").isEmpty { n += 1 }
+        if !(vehicle.powerText ?? "").isEmpty { n += 1 }
+        if !(vehicle.etaText ?? "").isEmpty { n += 1 }
+        if !(vehicle.chargedText ?? "").isEmpty { n += 1 }
+        if !(vehicle.todayRideText ?? "").isEmpty { n += 1 }
+        if let lock = vehicle.lockText, !lock.isEmpty, lock != "未知" { n += 1 }
+        return n
+    }
+}
+
+enum ZeehoWidgetFact: String, CaseIterable, Codable, Sendable {
+    case battery, mileage, lock, charge, pressure, signal, voltage, power, eta, charged, ride, address
+
+    var title: String {
+        switch self {
+        case .battery: return "电量"
+        case .mileage: return "总里程"
+        case .lock: return "车锁"
+        case .charge: return "充电"
+        case .pressure: return "胎压"
+        case .signal: return "信号"
+        case .voltage: return "电压"
+        case .power: return "功率"
+        case .eta: return "充满"
+        case .charged: return "已充"
+        case .ride: return "今日骑行"
+        case .address: return "位置"
+        }
+    }
+
+    func text(_ vehicle: VehicleStatus) -> String {
+        switch self {
+        case .battery: return vehicle.batteryText
+        case .mileage: return vehicle.mileageText
+        case .lock: return vehicle.lockText?.isEmpty == false ? vehicle.lockText! : "—"
+        case .charge: return vehicle.chargeDisplay
+        case .pressure: return vehicle.pressureText?.isEmpty == false ? vehicle.pressureText! : "—"
+        case .signal: return vehicle.signal?.isEmpty == false ? vehicle.signal! : "—"
+        case .voltage: return vehicle.voltageText?.isEmpty == false ? vehicle.voltageText! : "—"
+        case .power: return vehicle.powerText?.isEmpty == false ? vehicle.powerText! : "—"
+        case .eta: return vehicle.etaText?.isEmpty == false ? vehicle.etaText! : "—"
+        case .charged: return vehicle.chargedText?.isEmpty == false ? vehicle.chargedText! : "—"
+        case .ride: return vehicle.todayRideText?.isEmpty == false ? vehicle.todayRideText! : "—"
+        case .address: return vehicle.address?.isEmpty == false ? vehicle.address! : "暂无位置"
+        }
+    }
+
+    static let columns = 3
+    static let rows = 2
+    static let limit = columns * rows
+    static let fallback: [ZeehoWidgetFact] = [.mileage, .pressure, .signal]
+}
+
+struct ZeehoWidgetConfig: Codable, Equatable, Sendable {
+    var facts: [String] = ZeehoWidgetFact.fallback.map(\.rawValue)
+    var actions: [String] = ["find", "horn", "seat"]
+    var vehicleKey = ""
+
+    var shownFacts: [ZeehoWidgetFact] {
+        let picked = facts.compactMap(ZeehoWidgetFact.init(rawValue:)).uniqued().prefix(ZeehoWidgetFact.limit)
+        return picked.isEmpty ? ZeehoWidgetFact.fallback : Array(picked)
+    }
+
+    var shownActions: [VehicleAction] {
+        let options: [VehicleAction] = [.find, .horn, .seat, .unlock, .lock]
+        return actions.compactMap(VehicleAction.init(rawValue:)).filter { options.contains($0) }.uniqued().prefix(3).map { $0 }
+    }
+}
+
+struct ZeehoPointsPrefs: Codable, Equatable, Sendable {
+    var enabled = false
+    var content = "今日打卡"
+    var deleteAfter = true
+    var gapMs = 800
+    var days: [String: String] = [:]
+    var result = ""
+}
+
+struct ZeehoBatterySample: Codable, Equatable, Sendable {
+    var vin: String
+    var name: String
+    var at: TimeInterval
+    var soc: Int?
+    var voltage: String?
+    var power: String?
+    var charge: String?
+}
+
+private extension Array where Element: Hashable {
+    func uniqued() -> [Element] {
+        var seen: Set<Element> = []
+        return filter { seen.insert($0).inserted }
+    }
 }
 
 struct AccountSignin: Codable, Equatable, Identifiable, Sendable {
@@ -82,6 +325,10 @@ struct AccountSignin: Codable, Equatable, Identifiable, Sendable {
     var message: String?
     var ok: Bool?
     var posted: Bool?
+    var userId: String?
+    var unread: Int?
+    var latestMessage: String?
+    var latestMessageId: String?
     var vehicle: VehicleStatus?
     var vehicles: [VehicleStatus]?
 
@@ -135,6 +382,10 @@ struct AccountSignin: Codable, Equatable, Identifiable, Sendable {
             message: status.message,
             ok: status.ok,
             posted: status.posted,
+            userId: status.userId,
+            unread: status.unread,
+            latestMessage: status.latestMessage,
+            latestMessageId: status.latestMessageId,
             vehicle: status.vehicle.map { Self.tagged($0, account: account.id) },
             vehicles: status.vehicles?.map { Self.tagged($0, account: account.id) }
         )
@@ -146,6 +397,10 @@ struct AccountSignin: Codable, Equatable, Identifiable, Sendable {
         if row.totalIntegral == nil { row.totalIntegral = previous.totalIntegral }
         if row.continueDays == nil { row.continueDays = previous.continueDays }
         if (row.lastTime ?? "").isEmpty { row.lastTime = previous.lastTime }
+        if (row.userId ?? "").isEmpty { row.userId = previous.userId }
+        if row.unread == nil { row.unread = previous.unread }
+        if (row.latestMessage ?? "").isEmpty { row.latestMessage = previous.latestMessage }
+        if (row.latestMessageId ?? "").isEmpty { row.latestMessageId = previous.latestMessageId }
         return row
     }
 
@@ -164,6 +419,10 @@ struct SigninStatus: Codable, Equatable, Sendable {
     var today: String?
     var nickName: String?
     var avatar: String?
+    var userId: String?
+    var unread: Int?
+    var latestMessage: String?
+    var latestMessageId: String?
     var signedToday: Bool?
     var lastTime: String?
     var continueDays: Int?
@@ -278,8 +537,8 @@ struct SigninStatus: Codable, Equatable, Sendable {
         status.avatar = primary.avatar
         status.continueDays = primary.continueDays
         status.lastTime = primary.lastTime
-        status.vehicle = primary.shownVehicles.first
-        status.vehicles = rows.flatMap(\.shownVehicles)
+        status.vehicle = VehicleRoster.distinct(rows.flatMap(\.shownVehicles)).first
+        status.vehicles = VehicleRoster.distinct(rows.flatMap(\.shownVehicles))
         if rows.count > 1 {
             let totals = valid.compactMap(\.totalIntegral)
             status.totalIntegral = totals.isEmpty ? nil : totals.reduce(0, +)
@@ -427,6 +686,8 @@ struct ZeehoWidgetFields: Equatable, Sendable {
     var address = false
     var signal = false
     var voltage = false
+    var power = false
+    var eta = false
     var ride = false
 
     func lines(for vehicle: VehicleStatus) -> [(String, String)] {
@@ -443,6 +704,8 @@ struct ZeehoWidgetFields: Equatable, Sendable {
         add("充电", vehicle.chargeDisplay, enabled: charge)
         add("胎压", vehicle.pressureText, enabled: pressure)
         add("电压", vehicle.voltageText, enabled: voltage)
+        add("功率", vehicle.powerText, enabled: power)
+        add("充满", vehicle.etaText, enabled: eta)
         add("信号", vehicle.signal, enabled: signal)
         add("今日骑行", vehicle.todayRideText, enabled: ride)
         add("地址", vehicle.address, enabled: address)
@@ -475,7 +738,7 @@ enum ZeehoClock {
 
     /// 下一个 08:30（上海）。还没到就是今天，过了就是明天。
     static func nextSignSlot(after date: Date) -> Date {
-        var calendar = calendar
+        let calendar = calendar
         var parts = calendar.dateComponents([.year, .month, .day], from: date)
         parts.hour = 8
         parts.minute = 30
@@ -508,19 +771,17 @@ enum ZeehoClock {
 }
 
 enum ZeehoScheduler {
-    /// 未签到时 30 分钟内再试；已签到则最迟在次日 0:05 打卡，中间最多 4 小时刷新一次车辆。
+    /// 签到仍赶 08:30 和午夜。车况按用户选的间隔更新，最短 15 分钟，最长 24 小时。
     static func nextRefresh(after now: Date, status: SigninStatus) -> Date {
+        let interval = TimeInterval(ZeehoFiles.loadRefreshMinutes() * 60)
         if status.hasToken == false || status.tokenInvalid == true {
-            return now.addingTimeInterval(6 * 3600)
+            return now.addingTimeInterval(max(interval, 6 * 3600))
         }
         let morning = ZeehoClock.nextSignSlot(after: now)
-        if status.signedToday == true, status.today == ZeehoClock.todayString(now) {
-            var soon = min(morning, now.addingTimeInterval(4 * 3600))
-            if let midnight = ZeehoClock.nextMidnight(after: now) {
-                soon = min(soon, midnight.addingTimeInterval(5 * 60))
-            }
-            return soon
+        var soon = min(morning, now.addingTimeInterval(interval))
+        if status.signedToday == true, status.today == ZeehoClock.todayString(now), let midnight = ZeehoClock.nextMidnight(after: now) {
+            soon = min(soon, midnight.addingTimeInterval(5 * 60))
         }
-        return min(morning, now.addingTimeInterval(30 * 60))
+        return soon
     }
 }

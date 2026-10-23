@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 enum ZeehoToken {
     private static let uuid = try! NSRegularExpression(
@@ -218,6 +219,82 @@ enum ZeehoFiles {
         try? data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
 
+    static func avatarData(id: String) -> Data? {
+        let url = avatarURL(id)
+        guard let data = try? Data(contentsOf: url), data.count > 32 else { return nil }
+        return data
+    }
+
+    @discardableResult
+    static func ensureAvatars(_ status: SigninStatus) async -> [String: Data] {
+        var pairs = status.accountRows.map { ($0.id, $0.avatar) }
+        if pairs.isEmpty, let avatar = status.avatar, !avatar.isEmpty {
+            pairs = [(status.userId ?? "primary", avatar)]
+        }
+        var map: [String: Data] = [:]
+        for (id, url) in pairs {
+            await cacheAvatar(id: id, url: url)
+            if let data = avatarData(id: id) {
+                map[id] = data
+            }
+        }
+        return map
+    }
+
+    static func cacheAvatar(id: String, url: String?) async {
+        let clean = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty, let remote = avatarRemote(url) else { return }
+        let file = avatarURL(clean)
+        if let modified = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate,
+           Date().timeIntervalSince(modified) < 12 * 3600,
+           (try? Data(contentsOf: file))?.count ?? 0 > 32 {
+            return
+        }
+        var request = URLRequest(url: remote)
+        request.timeoutInterval = 8
+        request.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("image/*", forHTTPHeaderField: "Accept")
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              data.count > 32,
+              let image = UIImage(data: data) else { return }
+        let png = circlePNG(image, side: 128) ?? image.pngData()
+        guard let png, png.count > 32 else { return }
+        try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? png.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    }
+
+    private static func avatarRemote(_ url: String?) -> URL? {
+        var raw = url?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if raw.hasPrefix("//") { raw = "https:" + raw }
+        if raw.hasPrefix("http://") { raw = "https://" + raw.dropFirst("http://".count) }
+        raw = raw.replacingOccurrences(of: " ", with: "%20")
+        guard raw.hasPrefix("https://") else { return nil }
+        return URL(string: raw)
+    }
+
+    private static func avatarURL(_ id: String) -> URL {
+        let name = String(id.unicodeScalars.map { CharacterSet.alphanumerics.contains($0) ? Character($0) : "-" }.prefix(64))
+        return directory().appendingPathComponent("pics", isDirectory: true).appendingPathComponent("avatar-\(name)")
+    }
+
+    private static func circlePNG(_ image: UIImage, side: CGFloat) -> Data? {
+        let format = UIGraphicsImageRendererFormat()
+        format.opaque = false
+        format.scale = 1
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: side, height: side), format: format)
+        let drawn = renderer.image { context in
+            let rect = CGRect(x: 0, y: 0, width: side, height: side)
+            context.cgContext.addEllipse(in: rect)
+            context.cgContext.clip()
+            let scale = max(side / image.size.width, side / image.size.height)
+            let width = image.size.width * scale
+            let height = image.size.height * scale
+            image.draw(in: CGRect(x: (side - width) / 2, y: (side - height) / 2, width: width, height: height))
+        }
+        return drawn.pngData()
+    }
+
     private static func pictureURL(_ vin: String) -> URL {
         let name = vin.unicodeScalars.map { scalar -> String in
             CharacterSet.alphanumerics.contains(scalar) ? String(scalar) : "-"
@@ -229,6 +306,141 @@ enum ZeehoFiles {
         let command = ZeehoStagedCommand(action: action, vin: vin, accountId: accountId, name: name)
         guard let data = try? JSONEncoder().encode(command) else { return }
         try? data.write(to: directory().appendingPathComponent("pending-command.json"), options: .atomic)
+    }
+
+    static func loadWatchPrefs() -> ZeehoWatchPrefs {
+        let url = directory().appendingPathComponent("watch-prefs.json")
+        guard let data = try? Data(contentsOf: url),
+              let prefs = try? JSONDecoder().decode(ZeehoWatchPrefs.self, from: data) else {
+            return ZeehoWatchPrefs()
+        }
+        return prefs
+    }
+
+    static func saveWatchPrefs(_ prefs: ZeehoWatchPrefs) {
+        guard let data = try? JSONEncoder().encode(prefs) else { return }
+        try? data.write(to: directory().appendingPathComponent("watch-prefs.json"), options: .atomic)
+    }
+
+    static func loadWatchSlots() -> [String: ZeehoWatchSlot] {
+        let url = directory().appendingPathComponent("watch-slots.json")
+        guard let data = try? Data(contentsOf: url),
+              let slots = try? JSONDecoder().decode([String: ZeehoWatchSlot].self, from: data) else {
+            return [:]
+        }
+        return slots
+    }
+
+    static func saveWatchSlots(_ slots: [String: ZeehoWatchSlot]) {
+        guard let data = try? JSONEncoder().encode(slots) else { return }
+        try? data.write(to: directory().appendingPathComponent("watch-slots.json"), options: .atomic)
+    }
+
+    static func loadWatchAt() -> TimeInterval {
+        let url = directory().appendingPathComponent("watch-at")
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return 0 }
+        return TimeInterval(text) ?? 0
+    }
+
+    static func saveWatchAt(_ time: TimeInterval = Date().timeIntervalSince1970) {
+        try? String(time).write(to: directory().appendingPathComponent("watch-at"), atomically: true, encoding: .utf8)
+    }
+
+    static let refreshChoices = [15, 30, 60, 120, 240, 360, 720, 1440]
+
+    static func loadRefreshMinutes() -> Int {
+        let url = directory().appendingPathComponent("refresh-minutes")
+        let raw = Int((try? String(contentsOf: url, encoding: .utf8)) ?? "") ?? 15
+        return refreshChoices.contains(raw) ? raw : 15
+    }
+
+    static func saveRefreshMinutes(_ minutes: Int) {
+        let value = refreshChoices.contains(minutes) ? minutes : 15
+        try? String(value).write(to: directory().appendingPathComponent("refresh-minutes"), atomically: true, encoding: .utf8)
+    }
+
+    static func refreshLabel(_ minutes: Int) -> String {
+        if minutes < 60 { return "\(minutes) 分钟" }
+        if minutes % 60 == 0 { return "\(minutes / 60) 小时" }
+        return "\(minutes / 60) 小时 \(minutes % 60) 分钟"
+    }
+
+    static func loadWidgetConfig() -> ZeehoWidgetConfig {
+        let url = directory().appendingPathComponent("widget-config.json")
+        guard let data = try? Data(contentsOf: url),
+              let config = try? JSONDecoder().decode(ZeehoWidgetConfig.self, from: data) else {
+            return ZeehoWidgetConfig()
+        }
+        return config
+    }
+
+    static func saveWidgetConfig(_ config: ZeehoWidgetConfig) {
+        guard let data = try? JSONEncoder().encode(config) else { return }
+        try? data.write(to: directory().appendingPathComponent("widget-config.json"), options: .atomic)
+    }
+
+    static func pointsHint(_ status: SigninStatus) -> (title: String, done: Bool)? {
+        let prefs = loadPoints()
+        guard prefs.enabled else { return nil }
+        let today = ZeehoClock.todayString()
+        let rows = status.accountRows.filter { $0.tokenInvalid != true }
+        let total = max(rows.count, 1)
+        let done = rows.filter { prefs.days[$0.id] == today }.count
+        return ("积分 \(done)/\(total)", !rows.isEmpty && done == rows.count)
+    }
+
+    static func loadPoints() -> ZeehoPointsPrefs {
+        let url = directory().appendingPathComponent("points.json")
+        guard let data = try? Data(contentsOf: url),
+              let prefs = try? JSONDecoder().decode(ZeehoPointsPrefs.self, from: data) else {
+            return ZeehoPointsPrefs()
+        }
+        return prefs
+    }
+
+    static func savePoints(_ prefs: ZeehoPointsPrefs) {
+        guard let data = try? JSONEncoder().encode(prefs) else { return }
+        try? data.write(to: directory().appendingPathComponent("points.json"), options: .atomic)
+    }
+
+    static func recentBatteries(limit: Int = 3) -> [ZeehoBatterySample] {
+        Array(loadBatteries().suffix(limit).reversed())
+    }
+
+    static func recordBatteries(_ vehicles: [VehicleStatus]) {
+        let now = Date().timeIntervalSince1970
+        var current = loadBatteries()
+        for vehicle in vehicles {
+            let vin = vehicle.vin?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !vin.isEmpty, vehicle.battery != nil else { continue }
+            if let last = current.last(where: { $0.vin == vin }),
+               now - last.at < 10 * 60,
+               last.soc == vehicle.battery,
+               last.charge == vehicle.chargeDisplay {
+                continue
+            }
+            current.append(ZeehoBatterySample(
+                vin: vin,
+                name: vehicle.titleText,
+                at: now,
+                soc: vehicle.battery,
+                voltage: vehicle.voltageText,
+                power: vehicle.powerText,
+                charge: vehicle.chargeDisplay
+            ))
+        }
+        let trimmed = Array(current.suffix(240))
+        guard let data = try? JSONEncoder().encode(trimmed) else { return }
+        try? data.write(to: directory().appendingPathComponent("battery.json"), options: .atomic)
+    }
+
+    private static func loadBatteries() -> [ZeehoBatterySample] {
+        let url = directory().appendingPathComponent("battery.json")
+        guard let data = try? Data(contentsOf: url),
+              let rows = try? JSONDecoder().decode([ZeehoBatterySample].self, from: data) else {
+            return []
+        }
+        return rows
     }
 
     static func takeStagedCommand() -> ZeehoStagedCommand? {

@@ -25,6 +25,13 @@ final class ZeehoModel {
     var pendingCommand: PendingCommand?
     var chargeChoices: [String: [String]] = [:]
     var controlling = false
+    var watch = ZeehoWatchPrefs()
+    var refreshMinutes = 15
+    var notificationsAllowed = true
+    var widgetConfig = ZeehoWidgetConfig()
+    var points = ZeehoPointsPrefs()
+    var pointsNote = ""
+    var skin = ZeehoSkin()
 
     static let disclaimerKey = "zeeho.disclaimer.accepted"
 
@@ -37,6 +44,11 @@ final class ZeehoModel {
             return
         }
         status = ZeehoFiles.loadStatus() ?? .missingToken()
+        watch = ZeehoFiles.loadWatchPrefs()
+        refreshMinutes = ZeehoFiles.loadRefreshMinutes()
+        widgetConfig = ZeehoFiles.loadWidgetConfig()
+        points = ZeehoFiles.loadPoints()
+        skin = ZeehoSkinStore.current()
         acceptedDisclaimer = UserDefaults.standard.bool(forKey: Self.disclaimerKey)
         secretDraft = ZeehoConfig.current()
         allowsNetwork = true
@@ -52,6 +64,7 @@ final class ZeehoModel {
 
     func onForeground() async {
         consumeStagedCommand()
+        await prepareWatch()
         guard allowsNetwork, !refreshing else { return }
         let cached = ZeehoFiles.loadStatus() ?? .missingToken()
         status = cached
@@ -62,7 +75,11 @@ final class ZeehoModel {
             && cached.today == ZeehoClock.todayString()
             && (cached.updatedAtUnix).map { Date().timeIntervalSince1970 - $0 < 10 * 60 } == true
         if fresh {
-            ZeehoBackground.schedule(status: cached, replace: false)
+            let filled = await ZeehoEngine.refillVoltageIfNeeded(cached)
+            status = filled
+            await ZeehoFiles.ensureAvatars(filled)
+            WidgetCenter.shared.reloadAllTimelines()
+            ZeehoBackground.schedule(status: filled, replace: false)
             return
         }
         await refresh(ignoreGate: true)
@@ -140,6 +157,83 @@ final class ZeehoModel {
         let message = await ZeehoEngine.command(command.action, accountId: command.accountId, vin: command.vin, chargeValue: command.chargeValue)
         await refresh(ignoreGate: true)
         notice = message
+    }
+
+    func applySkin(_ next: ZeehoSkin) {
+        var stored = next
+        if stored.useImage, ZeehoSkinStore.imageData() == nil {
+            stored.useImage = false
+        }
+        skin = stored
+        ZeehoSkinStore.save(stored)
+        skin = ZeehoSkinStore.current()
+        WidgetCenter.shared.reloadAllTimelines()
+    }
+
+    func saveSkinImage(_ image: UIImage) {
+        ZeehoSkinStore.saveImage(image)
+        skin = ZeehoSkinStore.current()
+        WidgetCenter.shared.reloadAllTimelines()
+    }
+
+    func clearSkinImage() {
+        ZeehoSkinStore.clearImage()
+        skin = ZeehoSkinStore.current()
+        WidgetCenter.shared.reloadAllTimelines()
+    }
+
+    func setRefreshMinutes(_ minutes: Int) {
+        refreshMinutes = minutes
+        ZeehoFiles.saveRefreshMinutes(minutes)
+        WidgetCenter.shared.reloadAllTimelines()
+        ZeehoBackground.schedule(status: status, replace: true)
+    }
+
+    func saveWidget(_ next: ZeehoWidgetConfig) {
+        widgetConfig = next
+        ZeehoFiles.saveWidgetConfig(next)
+        WidgetCenter.shared.reloadAllTimelines()
+    }
+
+    func savePoints(_ next: ZeehoPointsPrefs) {
+        var stored = next
+        if stored.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            stored.content = ""
+        }
+        points = stored
+        ZeehoFiles.savePoints(stored)
+    }
+
+    func runPointsNow() async {
+        guard allowsNetwork, !refreshing else { return }
+        refreshing = true
+        defer { refreshing = false }
+        pointsNote = await ZeehoEngine.runPoints()
+        points = ZeehoFiles.loadPoints()
+    }
+
+    func prepareWatch() async {
+        let on = watch.charge || watch.messages || watch.low || watch.offline || watch.tire
+        guard on else { return }
+        let allowed = await ZeehoWatch.requestAccess()
+        notificationsAllowed = allowed
+        if !allowed {
+            banner = "系统没有允许通知，车况提醒发不出去。"
+        }
+    }
+
+    func setWatch(_ next: ZeehoWatchPrefs) {
+        watch = next
+        ZeehoFiles.saveWatchPrefs(next)
+        let on = next.charge || next.messages || next.low || next.offline || next.tire
+        guard on else { return }
+        Task {
+            let allowed = await ZeehoWatch.requestAccess()
+            notificationsAllowed = allowed
+            if !allowed {
+                banner = "系统没有允许通知，车况提醒发不出去。"
+            }
+        }
     }
 
     func loadChargeChoices(vehicle: VehicleStatus) async {

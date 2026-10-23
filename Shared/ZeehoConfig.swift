@@ -58,6 +58,8 @@ struct ZeehoSecrets: Codable, Equatable, Sendable {
 }
 
 enum ZeehoConfig {
+    /// 界面最下方显示的构建号。每次需要确认手机是否装上新代码时改这里。
+    static let build = "2026-10-22.5"
     static let vehicleURL = "https://tapi.zeehoev.com/v1.0/app/cfmotoserverapp/vehicleHomePage/"
     static let webUA = "Mozilla/5.0 (Linux; Android 9; SM-G9500 Build/PPR1.180610.011; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/136.0.7103.125 Mobile Safari/537.36 Zeeho/3.0.4 (samsung SM-G9500 Build/9)"
     static let zeehoUA = "MOBILE|Android|9|ZEEHO_APP|3.0.4|samsung SM-G9500|360*740|34cd9884-8171-41e8-a965-b10d042cae4f|4g|AndroidOS"
