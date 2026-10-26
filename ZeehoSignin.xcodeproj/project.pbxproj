@@ -32,6 +32,10 @@
 		B20000000000000000000008 /* ZeehoIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000008 /* ZeehoIntent.swift */; };
 		B20000000000000000000009 /* ZeehoWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000D /* ZeehoWidget.swift */; };
 		B20000000000000000000022 /* LocalToken.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000022 /* LocalToken.swift */; };
+		B10000000000000000000023 /* VehicleWatch.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000023 /* VehicleWatch.swift */; };
+		B10000000000000000000024 /* ZeehoCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000024 /* ZeehoCapture.swift */; };
+		B10000000000000000000025 /* ZeehoIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000025 /* ZeehoIntents.swift */; };
+		B20000000000000000000023 /* VehicleWatch.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000023 /* VehicleWatch.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -82,6 +86,9 @@
 		F10000000000000000000020 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 		F10000000000000000000021 /* LICENSE */ = {isa = PBXFileReference; lastKnownFileType = text; path = LICENSE; sourceTree = "<group>"; };
 		F10000000000000000000022 /* LocalToken.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalToken.swift; sourceTree = "<group>"; };
+		F10000000000000000000023 /* VehicleWatch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VehicleWatch.swift; sourceTree = "<group>"; };
+		F10000000000000000000024 /* ZeehoCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZeehoCapture.swift; sourceTree = "<group>"; };
+		F10000000000000000000025 /* ZeehoIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZeehoIntents.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -127,14 +134,17 @@
 			isa = PBXGroup;
 			children = (
 				F10000000000000000000005 /* ZeehoClient.swift */,
+				F10000000000000000000024 /* ZeehoCapture.swift */,
 				F10000000000000000000002 /* ZeehoConfig.swift */,
 				F10000000000000000000003 /* ZeehoCrypto.swift */,
 				F10000000000000000000006 /* ZeehoEngine.swift */,
 				F10000000000000000000004 /* ZeehoFiles.swift */,
+				F10000000000000000000025 /* ZeehoIntents.swift */,
 				F10000000000000000000022 /* LocalToken.swift */,
 				F10000000000000000000008 /* ZeehoIntent.swift */,
 				F10000000000000000000001 /* ZeehoModels.swift */,
 				F10000000000000000000007 /* ZeehoTheme.swift */,
+				F10000000000000000000023 /* VehicleWatch.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -278,6 +288,9 @@
 				B1000000000000000000000A /* ZeehoModel.swift in Sources */,
 				B1000000000000000000000B /* ContentView.swift in Sources */,
 				B1000000000000000000000C /* BackgroundRefresh.swift in Sources */,
+				B10000000000000000000023 /* VehicleWatch.swift in Sources */,
+				B10000000000000000000024 /* ZeehoCapture.swift in Sources */,
+				B10000000000000000000025 /* ZeehoIntents.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -295,6 +308,7 @@
 				B20000000000000000000008 /* ZeehoIntent.swift in Sources */,
 				B20000000000000000000022 /* LocalToken.swift in Sources */,
 				B20000000000000000000009 /* ZeehoWidget.swift in Sources */,
+				B20000000000000000000023 /* VehicleWatch.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

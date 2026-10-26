@@ -39,6 +39,8 @@ struct ContentView: View {
                     }
                     appearanceSection
                     autoSection
+                    watchSection
+                    captureSection
                     secretsSection
                     footer
                 }
@@ -873,6 +875,101 @@ struct ContentView: View {
             .foregroundStyle(ZeehoTheme.onSurface)
             .padding(10)
             .background(ZeehoTheme.surfaceContainerHighest, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private var watchSection: some View {
+        @Bindable var model = model
+        return DisclosureGroup {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("后台每次刷新后评估，有状态变化时发本地通知。iOS 要先允许通知权限。")
+                    .font(ZeehoFont.bodySmall)
+                    .foregroundStyle(ZeehoTheme.onSurfaceVariant)
+                Toggle("充电状态", isOn: Binding(
+                    get: { model.watchPrefs.charge },
+                    set: { model.watchPrefs.charge = $0; model.saveWatchPrefs() }
+                ))
+                Toggle("电量偏低（≤20%）", isOn: Binding(
+                    get: { model.watchPrefs.low },
+                    set: { model.watchPrefs.low = $0; model.saveWatchPrefs() }
+                ))
+                Toggle("车辆离线", isOn: Binding(
+                    get: { model.watchPrefs.offline },
+                    set: { model.watchPrefs.offline = $0; model.saveWatchPrefs() }
+                ))
+                Toggle("胎压异常", isOn: Binding(
+                    get: { model.watchPrefs.tire },
+                    set: { model.watchPrefs.tire = $0; model.saveWatchPrefs() }
+                ))
+            }
+            .toggleStyle(.switch)
+            .tint(ZeehoTheme.primary)
+            .padding(.top, 8)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "bell.badge")
+                    .foregroundStyle(ZeehoTheme.primary)
+                Text("车辆监控告警")
+                    .font(ZeehoFont.labelLarge)
+                    .foregroundStyle(ZeehoTheme.onSurface)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(ZeehoTheme.surfaceContainer, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .tint(ZeehoTheme.primary)
+    }
+
+    private var captureSection: some View {
+        @Bindable var model = model
+        return DisclosureGroup {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("开 VPN 代理官方极核 App 的流量，自动抓到 Authorization Token 并导入。第一次要装自签 CA。")
+                    .font(ZeehoFont.bodySmall)
+                    .foregroundStyle(ZeehoTheme.onSurfaceVariant)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("⚠️ 需先在 Xcode 里加 Network Extension target（ZeehoTunnel）。App Store 审核会查 VPN 用途，请如实描述。")
+                    .font(ZeehoFont.labelSmall)
+                    .foregroundStyle(ZeehoTheme.onErrorContainer)
+                HStack {
+                    Button("开始抓取") {
+                        Task {
+                            do {
+                                try await ZeehoCaptureManager.shared.start()
+                                model.notice = "VPN 已建立，去官方 App 登录"
+                            } catch {
+                                model.banner = error.localizedDescription
+                            }
+                        }
+                    }
+                    .disabled(ZeehoCaptureManager.shared.result.state == .requestingVPN || ZeehoCaptureManager.shared.result.state == .waiting || ZeehoCaptureManager.shared.result.state == .running)
+                    if ZeehoCaptureManager.shared.result.state == .waiting || ZeehoCaptureManager.shared.result.state == .running {
+                        ProgressView().controlSize(.small).tint(ZeehoTheme.onPrimaryContainer)
+                        Button("停止") { ZeehoCaptureManager.shared.stop() }
+                            .foregroundStyle(ZeehoTheme.onErrorContainer)
+                    }
+                }
+                .font(ZeehoFont.labelLarge)
+            }
+            .padding(.top, 8)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "network.badge.shield.half.filled")
+                    .foregroundStyle(ZeehoTheme.primary)
+                Text("代理抓取 Token")
+                    .font(ZeehoFont.labelLarge)
+                    .foregroundStyle(ZeehoTheme.onSurface)
+                Spacer()
+                if ZeehoCaptureManager.shared.result.state == .waiting || ZeehoCaptureManager.shared.result.state == .running {
+                    Text("运行中")
+                        .font(ZeehoFont.labelSmall)
+                        .foregroundStyle(ZeehoTheme.onPrimaryContainer)
+                }
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(ZeehoTheme.surfaceContainer, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .tint(ZeehoTheme.primary)
     }
 
     private var footer: some View {

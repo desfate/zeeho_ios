@@ -30,6 +30,14 @@ struct VehicleStatus: Codable, Equatable, Sendable {
     var rearBar: Double?
     var tireWarn: Bool = false
     var accountId: String?
+    // Android 版补齐字段
+    var currentText: String?
+    var powerText: String?
+    var etaText: String?
+    var chargedText: String?
+    var frontBar: Double?
+    var rearBar: Double?
+    var tireWarn: Bool = false
 
     var mileageText: String {
         guard let mileageKm else { return "—" }

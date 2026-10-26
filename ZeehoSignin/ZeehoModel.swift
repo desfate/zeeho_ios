@@ -25,13 +25,7 @@ final class ZeehoModel {
     var pendingCommand: PendingCommand?
     var chargeChoices: [String: [String]] = [:]
     var controlling = false
-    var watch = ZeehoWatchPrefs()
-    var refreshMinutes = 15
-    var notificationsAllowed = true
-    var widgetConfig = ZeehoWidgetConfig()
-    var points = ZeehoPointsPrefs()
-    var pointsNote = ""
-    var skin = ZeehoSkin()
+    var watchPrefs: WatchPrefs = WatchPrefs()
 
     static let disclaimerKey = "zeeho.disclaimer.accepted"
 
@@ -41,17 +35,14 @@ final class ZeehoModel {
             acceptedDisclaimer = true
             secretDraft = .builtIn
             allowsNetwork = false
+            watchPrefs = WatchPrefs()
             return
         }
         status = ZeehoFiles.loadStatus() ?? .missingToken()
-        watch = ZeehoFiles.loadWatchPrefs()
-        refreshMinutes = ZeehoFiles.loadRefreshMinutes()
-        widgetConfig = ZeehoFiles.loadWidgetConfig()
-        points = ZeehoFiles.loadPoints()
-        skin = ZeehoSkinStore.current()
         acceptedDisclaimer = UserDefaults.standard.bool(forKey: Self.disclaimerKey)
         secretDraft = ZeehoConfig.current()
         allowsNetwork = true
+        watchPrefs = ZeehoFiles.watchPrefs()
         if ZeehoFiles.loadAccounts().isEmpty && (status.hasToken == false || status.tokenInvalid == true) {
             editingToken = true
         }
@@ -64,7 +55,6 @@ final class ZeehoModel {
 
     func onForeground() async {
         consumeStagedCommand()
-        await prepareWatch()
         guard allowsNetwork, !refreshing else { return }
         let cached = ZeehoFiles.loadStatus() ?? .missingToken()
         status = cached
@@ -75,11 +65,7 @@ final class ZeehoModel {
             && cached.today == ZeehoClock.todayString()
             && (cached.updatedAtUnix).map { Date().timeIntervalSince1970 - $0 < 10 * 60 } == true
         if fresh {
-            let filled = await ZeehoEngine.refillVoltageIfNeeded(cached)
-            status = filled
-            await ZeehoFiles.ensureAvatars(filled)
-            WidgetCenter.shared.reloadAllTimelines()
-            ZeehoBackground.schedule(status: filled, replace: false)
+            ZeehoBackground.schedule(status: cached, replace: false)
             return
         }
         await refresh(ignoreGate: true)
@@ -99,6 +85,7 @@ final class ZeehoModel {
         defer { refreshing = false }
         let status = await ZeehoEngine.refresh(ignoreGate: ignoreGate)
         apply(status)
+        ZeehoVehicleAlerts.after(status: status)
         WidgetCenter.shared.reloadAllTimelines()
         ZeehoBackground.schedule(status: status, replace: true)
     }
@@ -159,83 +146,6 @@ final class ZeehoModel {
         notice = message
     }
 
-    func applySkin(_ next: ZeehoSkin) {
-        var stored = next
-        if stored.useImage, ZeehoSkinStore.imageData() == nil {
-            stored.useImage = false
-        }
-        skin = stored
-        ZeehoSkinStore.save(stored)
-        skin = ZeehoSkinStore.current()
-        WidgetCenter.shared.reloadAllTimelines()
-    }
-
-    func saveSkinImage(_ image: UIImage) {
-        ZeehoSkinStore.saveImage(image)
-        skin = ZeehoSkinStore.current()
-        WidgetCenter.shared.reloadAllTimelines()
-    }
-
-    func clearSkinImage() {
-        ZeehoSkinStore.clearImage()
-        skin = ZeehoSkinStore.current()
-        WidgetCenter.shared.reloadAllTimelines()
-    }
-
-    func setRefreshMinutes(_ minutes: Int) {
-        refreshMinutes = minutes
-        ZeehoFiles.saveRefreshMinutes(minutes)
-        WidgetCenter.shared.reloadAllTimelines()
-        ZeehoBackground.schedule(status: status, replace: true)
-    }
-
-    func saveWidget(_ next: ZeehoWidgetConfig) {
-        widgetConfig = next
-        ZeehoFiles.saveWidgetConfig(next)
-        WidgetCenter.shared.reloadAllTimelines()
-    }
-
-    func savePoints(_ next: ZeehoPointsPrefs) {
-        var stored = next
-        if stored.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            stored.content = ""
-        }
-        points = stored
-        ZeehoFiles.savePoints(stored)
-    }
-
-    func runPointsNow() async {
-        guard allowsNetwork, !refreshing else { return }
-        refreshing = true
-        defer { refreshing = false }
-        pointsNote = await ZeehoEngine.runPoints()
-        points = ZeehoFiles.loadPoints()
-    }
-
-    func prepareWatch() async {
-        let on = watch.charge || watch.messages || watch.low || watch.offline || watch.tire
-        guard on else { return }
-        let allowed = await ZeehoWatch.requestAccess()
-        notificationsAllowed = allowed
-        if !allowed {
-            banner = "系统没有允许通知，车况提醒发不出去。"
-        }
-    }
-
-    func setWatch(_ next: ZeehoWatchPrefs) {
-        watch = next
-        ZeehoFiles.saveWatchPrefs(next)
-        let on = next.charge || next.messages || next.low || next.offline || next.tire
-        guard on else { return }
-        Task {
-            let allowed = await ZeehoWatch.requestAccess()
-            notificationsAllowed = allowed
-            if !allowed {
-                banner = "系统没有允许通知，车况提醒发不出去。"
-            }
-        }
-    }
-
     func loadChargeChoices(vehicle: VehicleStatus) async {
         guard allowsNetwork, let vin = vehicle.vin, let accountId = vehicle.accountId else { return }
         if chargeChoices[vin]?.isEmpty == false { return }
@@ -265,6 +175,12 @@ final class ZeehoModel {
         ZeehoConfig.save(.builtIn)
         notice = "已恢复默认密钥"
         banner = ""
+    }
+
+    func saveWatchPrefs() {
+        ZeehoFiles.saveWatchPrefs(watchPrefs)
+        // 配置变化时也评估一次（可能从无到有，立即发通知）
+        ZeehoVehicleAlerts.after(status: ZeehoFiles.loadStatus() ?? .missingToken())
     }
 
     private func apply(_ status: SigninStatus) {

@@ -37,9 +37,9 @@ enum ZeehoBackground {
     private static func handle(_ task: BGAppRefreshTask) {
         let box = CompletionBox()
         let work = Task {
-            let signed = await ZeehoEngine.refresh(ignoreGate: true)
-            let watched = await ZeehoEngine.watchIfDue()
-            let status = (watched.updatedAtUnix ?? 0) > (signed.updatedAtUnix ?? 0) ? watched : signed
+            let status = await ZeehoEngine.refresh(ignoreGate: true)
+            // 每次刷新后评估车辆监控告警
+            ZeehoVehicleAlerts.after(status: status)
             WidgetCenter.shared.reloadAllTimelines()
             schedule(status: status, replace: true)
             box.finish(task, success: true)
