@@ -39,7 +39,6 @@ struct ContentView: View {
                     }
                     appearanceSection
                     autoSection
-                    watchSection
                     captureSection
                     secretsSection
                     footer
@@ -875,48 +874,6 @@ struct ContentView: View {
             .foregroundStyle(ZeehoTheme.onSurface)
             .padding(10)
             .background(ZeehoTheme.surfaceContainerHighest, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-    }
-
-    private var watchSection: some View {
-        @Bindable var model = model
-        return DisclosureGroup {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("后台每次刷新后评估，有状态变化时发本地通知。iOS 要先允许通知权限。")
-                    .font(ZeehoFont.bodySmall)
-                    .foregroundStyle(ZeehoTheme.onSurfaceVariant)
-                Toggle("充电状态", isOn: Binding(
-                    get: { model.watchPrefs.charge },
-                    set: { model.watchPrefs.charge = $0; model.saveWatchPrefs() }
-                ))
-                Toggle("电量偏低（≤20%）", isOn: Binding(
-                    get: { model.watchPrefs.low },
-                    set: { model.watchPrefs.low = $0; model.saveWatchPrefs() }
-                ))
-                Toggle("车辆离线", isOn: Binding(
-                    get: { model.watchPrefs.offline },
-                    set: { model.watchPrefs.offline = $0; model.saveWatchPrefs() }
-                ))
-                Toggle("胎压异常", isOn: Binding(
-                    get: { model.watchPrefs.tire },
-                    set: { model.watchPrefs.tire = $0; model.saveWatchPrefs() }
-                ))
-            }
-            .toggleStyle(.switch)
-            .tint(ZeehoTheme.primary)
-            .padding(.top, 8)
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "bell.badge")
-                    .foregroundStyle(ZeehoTheme.primary)
-                Text("车辆监控告警")
-                    .font(ZeehoFont.labelLarge)
-                    .foregroundStyle(ZeehoTheme.onSurface)
-            }
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(ZeehoTheme.surfaceContainer, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .tint(ZeehoTheme.primary)
     }
 
     private var captureSection: some View {

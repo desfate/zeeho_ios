@@ -95,6 +95,15 @@ struct ZeehoVehicleShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         [
             AppShortcut(
+                intent: ZeehoSignInIntent(),
+                phrases: [
+                    "用\(.applicationName)签到",
+                    "让\(.applicationName)打卡",
+                ],
+                shortTitle: "签到",
+                systemImageName: "checkmark.seal"
+            ),
+            AppShortcut(
                 intent: ZeehoFindIntent(),
                 phrases: ["寻车", "找车在哪", "\(.applicationName)寻车"],
                 shortTitle: "寻车",

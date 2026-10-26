@@ -28,11 +28,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     ) -> Bool {
         ZeehoBackground.register()
         ZeehoBackground.schedule(status: ZeehoFiles.loadStatus(), replace: false)
-        // 启动时请求通知权限 + 评估告警增量
         ZeehoNotifier.requestAuthorizationIfNeeded()
-        if let status = ZeehoFiles.loadStatus() {
-            ZeehoVehicleAlerts.after(status: status)
-        }
         // iOS 15 兼容：主屏长按 App 图标显示快捷弹窗（iOS 16+ 用 AppIntents 的 AppShortcutProvider）
         if #available(iOS 16.0, *) {
             // AppShortcutProvider 自动生效
