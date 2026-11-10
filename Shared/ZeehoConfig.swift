@@ -1,8 +1,7 @@
 import Foundation
 
 /// 公开客户端的接口签名参数，不是登录 Token。
-/// 与 Mac 版 `config/local.example.json` 相同。2026-10-11 起 H5 签到改走
-/// `/cfmotoservermine/H5/`，密钥也换成了 `h5AppId` 这一套；车辆接口仍用 tapi 密钥。
+/// H5 签到用 `h5AppId`。车辆接口与当前 Android `ZeehoSecretDefaults` 一致。
 struct ZeehoSecrets: Codable, Equatable, Sendable {
     var baseURL: String
     var h5AppId: String
@@ -15,10 +14,15 @@ struct ZeehoSecrets: Codable, Equatable, Sendable {
         baseURL: "https://h5.zeehoev.com",
         h5AppId: "AiTXmBrm",
         h5AppSecret: "70c2c7458ab88ca9504ad0521f170075bc91f2f7",
-        appId: "Sw5F9uJi",
-        appSecret: "46870a8f678a09109468f5b0168818b91c292845",
-        vehicleAesKey: "ce2cd7cb57124c1349dd8543bf6fd31d"
+        appId: "S7qPWPU1",
+        appSecret: "c5e0da7f4da28df805694ec3dd1fc6792e9df99d",
+        vehicleAesKey: "9dbc2cbf2ec327699301b495010316ec"
     )
+
+    /// 服务器已拒绝这套车辆签名，本地如果还存着就换回当前默认值。
+    private static let retiredAppIds: Set<String> = ["Sw5F9uJi"]
+    private static let retiredAppSecrets: Set<String> = ["46870a8f678a09109468f5b0168818b91c292845"]
+    private static let retiredAesKeys: Set<String> = ["ce2cd7cb57124c1349dd8543bf6fd31d"]
 
     init(baseURL: String, h5AppId: String, h5AppSecret: String, appId: String, appSecret: String, vehicleAesKey: String) {
         self.baseURL = baseURL
@@ -55,11 +59,20 @@ struct ZeehoSecrets: Codable, Equatable, Sendable {
             vehicleAesKey: pick(vehicleAesKey, base.vehicleAesKey)
         )
     }
+
+    func migrated() -> ZeehoSecrets {
+        var copy = filled()
+        let base = Self.builtIn
+        if Self.retiredAppIds.contains(copy.appId) { copy.appId = base.appId }
+        if Self.retiredAppSecrets.contains(copy.appSecret) { copy.appSecret = base.appSecret }
+        if Self.retiredAesKeys.contains(copy.vehicleAesKey) { copy.vehicleAesKey = base.vehicleAesKey }
+        return copy
+    }
 }
 
 enum ZeehoConfig {
     /// 界面最下方显示的构建号。每次需要确认手机是否装上新代码时改这里。
-    static let build = "2026-10-22.5"
+    static let build = "2026-10-26.2"
     static let vehicleURL = "https://tapi.zeehoev.com/v1.0/app/cfmotoserverapp/vehicleHomePage/"
     static let webUA = "Mozilla/5.0 (Linux; Android 9; SM-G9500 Build/PPR1.180610.011; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/136.0.7103.125 Mobile Safari/537.36 Zeeho/3.0.4 (samsung SM-G9500 Build/9)"
     static let zeehoUA = "MOBILE|Android|9|ZEEHO_APP|3.0.4|samsung SM-G9500|360*740|34cd9884-8171-41e8-a965-b10d042cae4f|4g|AndroidOS"
@@ -70,7 +83,11 @@ enum ZeehoConfig {
               let saved = try? JSONDecoder().decode(ZeehoSecrets.self, from: data) else {
             return .builtIn
         }
-        return saved.filled()
+        let migrated = saved.migrated()
+        if migrated != saved.filled() {
+            save(migrated)
+        }
+        return migrated
     }
 
     static func save(_ secrets: ZeehoSecrets) {

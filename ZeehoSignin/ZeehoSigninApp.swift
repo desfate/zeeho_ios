@@ -55,11 +55,13 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             UIApplicationShortcutItem(
                 type: "zeeho.lock",
                 localizedTitle: "关锁",
+                localizedSubtitle: "云端关锁",
                 icon: UIApplicationShortcutIcon(systemImageName: "lock.fill")
             ),
             UIApplicationShortcutItem(
                 type: "zeeho.unlock",
                 localizedTitle: "开锁",
+                localizedSubtitle: "云端开锁",
                 icon: UIApplicationShortcutIcon(systemImageName: "lock.open")
             ),
         ]

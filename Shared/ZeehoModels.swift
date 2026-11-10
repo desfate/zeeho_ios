@@ -247,6 +247,24 @@ enum ZeehoWidgetFact: String, CaseIterable, Codable, Sendable {
         }
     }
 
+    /// SF Symbol 图标（对齐 Android WidgetFact 风格，几何面板/小组件共用）
+    var icon: String {
+        switch self {
+        case .battery: return "battery.75"
+        case .mileage: return "speedometer"
+        case .lock: return "lock.fill"
+        case .charge: return "bolt.batteryblock.fill"
+        case .pressure: return "tirepressure"
+        case .signal: return "antenna.radiowaves.left.and.right"
+        case .voltage: return "bolt.fill"
+        case .power: return "gauge.with.dots.needle.50percent"
+        case .eta: return "clock.badge.checkmark"
+        case .charged: return "bolt.badge.automatic"
+        case .ride: return "figure.outdoor.cycle"
+        case .address: return "location.fill"
+        }
+    }
+
     func text(_ vehicle: VehicleStatus) -> String {
         switch self {
         case .battery: return vehicle.batteryText
@@ -331,6 +349,7 @@ struct AccountSignin: Codable, Equatable, Identifiable, Sendable {
     var latestMessageId: String?
     var vehicle: VehicleStatus?
     var vehicles: [VehicleStatus]?
+    var createdAtUnix: TimeInterval?
 
     var displayName: String {
         if let nickName, !nickName.isEmpty { return nickName }
@@ -351,6 +370,15 @@ struct AccountSignin: Codable, Equatable, Identifiable, Sendable {
         continueDays.map { "\($0) 天" } ?? "—"
     }
 
+    /// 签名到期时间（Token 默认 30 天）
+    var expiresAtUnix: TimeInterval? {
+        createdAtUnix.map { $0 + 30 * 86400 }
+    }
+
+    var expiresText: String {
+        ZeehoStoredAccount.expiresText(for: expiresAtUnix)
+    }
+
     var shownVehicles: [VehicleStatus] {
         if let vehicles, !vehicles.isEmpty { return vehicles }
         if let vehicle { return [vehicle] }
@@ -364,7 +392,8 @@ struct AccountSignin: Codable, Equatable, Identifiable, Sendable {
             signedToday: false,
             tokenInvalid: false,
             message: "等待刷新",
-            ok: false
+            ok: false,
+            createdAtUnix: account.createdAtUnix
         )
     }
 
@@ -387,7 +416,8 @@ struct AccountSignin: Codable, Equatable, Identifiable, Sendable {
             latestMessage: status.latestMessage,
             latestMessageId: status.latestMessageId,
             vehicle: status.vehicle.map { Self.tagged($0, account: account.id) },
-            vehicles: status.vehicles?.map { Self.tagged($0, account: account.id) }
+            vehicles: status.vehicles?.map { Self.tagged($0, account: account.id) },
+            createdAtUnix: account.createdAtUnix
         )
         guard let previous else { return row }
         if row.vehicle == nil { row.vehicle = previous.vehicle }

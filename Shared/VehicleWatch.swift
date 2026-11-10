@@ -80,18 +80,18 @@ enum VehicleWatch {
                 ))
                 if seen && previous?.charge != "充电中" {
                     let body = vehicle.battery.map { "当前电量 \($0)%" } ?? "充电器已连接"
-                    notes.append(WatchNote(id: Self.noteId(vin: vin, kind: 1), title: "开始充电", body: body, channel: VehicleWatchConsts.CHANNEL_CHARGE))
+                    notes.append(WatchNote(id: Self.noteId(vin: vin, kind: 1), title: "开始充电", body: body, channel: VehicleWatchConsts.CHANNEL_CHARGE, ongoing: false, cancel: false))
                 }
             } else if previous?.charge == "充电中" {
                 notes.append(WatchNote(id: Self.noteId(vin: vin, kind: 0), title: "", body: "", channel: VehicleWatchConsts.CHANNEL_PROGRESS, ongoing: false, cancel: true))
             }
             if seen && previous?.charge == "充电中" && nowCharge == "充电完成" {
                 let body = vehicle.battery.map { "当前电量 \($0)%，可以拔枪了" } ?? "可以拔枪了"
-                notes.append(WatchNote(id: Self.noteId(vin: vin, kind: 2), title: "已充满", body: body, channel: VehicleWatchConsts.CHANNEL_CHARGE))
+                notes.append(WatchNote(id: Self.noteId(vin: vin, kind: 2), title: "已充满", body: body, channel: VehicleWatchConsts.CHANNEL_CHARGE, ongoing: false, cancel: false))
             }
             if seen && previous?.charge == "充电中" && nowCharge == "未充电" {
                 let body = vehicle.battery.map { "当前电量 \($0)% · 充电器已断开" } ?? "充电器已断开"
-                notes.append(WatchNote(id: Self.noteId(vin: vin, kind: 3), title: "充电已停止", body: body, channel: VehicleWatchConsts.CHANNEL_CHARGE))
+                notes.append(WatchNote(id: Self.noteId(vin: vin, kind: 3), title: "充电已停止", body: body, channel: VehicleWatchConsts.CHANNEL_CHARGE, ongoing: false, cancel: false))
             }
         }
 
@@ -104,7 +104,9 @@ enum VehicleWatch {
                 id: Self.noteId(vin: vin, kind: 4),
                 title: "电量偏低",
                 body: "当前电量 \(soc)%，建议尽快充电",
-                channel: VehicleWatchConsts.CHANNEL_ALERT
+                channel: VehicleWatchConsts.CHANNEL_ALERT,
+                ongoing: false,
+                cancel: false
             ))
             lowNotified = true
         }
@@ -115,7 +117,9 @@ enum VehicleWatch {
                 id: Self.noteId(vin: vin, kind: 5),
                 title: "车辆离线",
                 body: "\(vehicle.titleText) 已离线，状态与充电可能停止更新",
-                channel: VehicleWatchConsts.CHANNEL_ALERT
+                channel: VehicleWatchConsts.CHANNEL_ALERT,
+                ongoing: false,
+                cancel: false
             ))
         }
 
@@ -127,7 +131,9 @@ enum VehicleWatch {
                 id: Self.noteId(vin: vin, kind: 6),
                 title: "胎压异常",
                 body: problem,
-                channel: VehicleWatchConsts.CHANNEL_ALERT
+                channel: VehicleWatchConsts.CHANNEL_ALERT,
+                ongoing: false,
+                cancel: false
             ))
             tireNotified = true
         }
@@ -141,7 +147,9 @@ enum VehicleWatch {
                     id: Self.noteId(vin: vin, kind: 7),
                     title: "新车辆消息",
                     body: "\(mail.unread) 条未读 · \(body)",
-                    channel: VehicleWatchConsts.CHANNEL_ALERT
+                    channel: VehicleWatchConsts.CHANNEL_ALERT,
+                    ongoing: false,
+                    cancel: false
                 ))
             }
             msgId = mail.id

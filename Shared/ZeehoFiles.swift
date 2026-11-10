@@ -60,6 +60,28 @@ struct ZeehoStoredAccount: Codable, Equatable, Identifiable, Sendable {
     var id: String
     var label: String
     var token: String
+    /// 账号写入时间；Zeeho Token 默认有效期 30 天，过期时间按 createdAt + 30d 估算。
+    var createdAtUnix: TimeInterval?
+
+    var expiresAtUnix: TimeInterval? {
+        guard let createdAtUnix else { return nil }
+        return createdAtUnix + 30 * 86400
+    }
+
+    var expiresText: String {
+        ZeehoStoredAccount.expiresText(for: expiresAtUnix)
+    }
+
+    static func expiresText(for expiresAtUnix: TimeInterval?) -> String {
+        guard let expiresAtUnix else { return "未知" }
+        let remaining = expiresAtUnix - Date().timeIntervalSince1970
+        if remaining <= 0 { return "已过期" }
+        let days = Int(remaining / 86400)
+        if days >= 1 { return "\(days) 天后到期" }
+        let hours = Int(remaining / 3600)
+        if hours >= 1 { return "\(hours) 小时后到期" }
+        return "即将到期"
+    }
 }
 
 enum ZeehoFiles {
@@ -132,6 +154,14 @@ enum ZeehoFiles {
 
     static func loadAccounts() -> [ZeehoStoredAccount] {
         var accounts = storedAccounts()
+        // Lazy migration：老账号没有 createdAtUnix，用"现在"补齐，避免立刻显示"已过期"
+        var migrated = false
+        let now = Date().timeIntervalSince1970
+        for i in accounts.indices where accounts[i].createdAtUnix == nil {
+            accounts[i].createdAtUnix = now
+            migrated = true
+        }
+        if migrated { try? saveAccounts(accounts) }
         let stampURL = directory().appendingPathComponent("token.bundle")
         let applied = (try? String(contentsOf: stampURL, encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -379,6 +409,42 @@ enum ZeehoFiles {
         try? data.write(to: directory().appendingPathComponent("widget-config.json"), options: .atomic)
     }
 
+    // MARK: - Prize（盲盒 / 补领结果持久化）
+
+    private struct PrizePayload: Codable {
+        var prizeName: String
+        var integral: String
+        var type: String
+        var day: String
+        var celebrated: Bool = false
+    }
+
+    static func savePrize(_ claim: ZeehoBonusClaim, day: String) {
+        guard !claim.prizeName.isEmpty else { return }
+        let payload = PrizePayload(prizeName: claim.prizeName, integral: claim.integral, type: claim.type, day: day, celebrated: false)
+        guard let data = try? JSONEncoder().encode(payload) else { return }
+        try? data.write(to: directory().appendingPathComponent("prize.json"), options: .atomic)
+    }
+
+    static func loadPrize() -> (name: String, integral: String, type: String, day: String)? {
+        let url = directory().appendingPathComponent("prize.json")
+        guard let data = try? Data(contentsOf: url),
+              let payload = try? JSONDecoder().decode(PrizePayload.self, from: data),
+              !payload.prizeName.isEmpty,
+              !payload.celebrated else { return nil }
+        return (payload.prizeName, payload.integral, payload.type, payload.day)
+    }
+
+    static func markPrizeCelebrated() {
+        let url = directory().appendingPathComponent("prize.json")
+        guard let data = try? Data(contentsOf: url),
+              var payload = try? JSONDecoder().decode(PrizePayload.self, from: data) else { return }
+        payload.celebrated = true
+        if let next = try? JSONEncoder().encode(payload) {
+            try? next.write(to: url, options: .atomic)
+        }
+    }
+
     static func pointsHint(_ status: SigninStatus) -> (title: String, done: Bool)? {
         let prefs = loadPoints()
         guard prefs.enabled else { return nil }
@@ -405,6 +471,10 @@ enum ZeehoFiles {
 
     static func recentBatteries(limit: Int = 3) -> [ZeehoBatterySample] {
         Array(loadBatteries().suffix(limit).reversed())
+    }
+
+    static func batteriesSince(_ since: TimeInterval) -> [ZeehoBatterySample] {
+        loadBatteries().filter { $0.at >= since }
     }
 
     static func recordBatteries(_ vehicles: [VehicleStatus]) {

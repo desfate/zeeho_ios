@@ -4,7 +4,7 @@ import os
 
 private let apiLog = Logger(subsystem: "com.jieyu.zeeho.signin", category: "api")
 
-private struct HTTPResult {
+struct HTTPResult {
     var status: Int
     var json: [String: Any]?
     var error: String?
@@ -356,15 +356,15 @@ struct ZeehoClient {
             )
             return commandMessage(result, success: "寻车指令已下发，车辆应闪灯")
         case .horn:
-            let body = "{\"param\":\"4\",\"vin\":\"\(vin)\"}"
-            let result = await appRequest(
-                method: "POST",
-                urlText: "\(base)/vehicleInfo/controlV2",
+            let point = await dbpoint(token: token, vin: vin, secrets: secrets, functionCode: "LOUDLY_SEARCH_CAR", type: "LOW")
+            let control = await appRequest(
+                method: "PUT",
+                urlText: "\(base)/vehicleInfo/control/\(vin)",
                 token: token,
-                secrets: secrets,
-                body: body
+                secrets: secrets
             )
-            return commandMessage(result, success: "鸣笛闪灯指令已下发")
+            let chosen = ZeehoJSON.isOK(point.json) ? point : control
+            return commandMessage(chosen, success: "鸣笛闪灯指令已下发")
         case .seat:
             let body = "{\"commond\":\"28\",\"commondParam\":\"1\",\"vcu\":\"\(vin)\",\"version\":\"v2\"}"
             let result = await appRequest(
@@ -377,6 +377,8 @@ struct ZeehoClient {
             return commandMessage(result, success: "开坐垫指令已下发")
         case .unlock, .lock:
             let flag = action == .unlock ? "1" : "0"
+            let mode = action == .unlock ? "ON" : "OFF"
+            let point = await dbpoint(token: token, vin: vin, secrets: secrets, functionCode: "ON_AND_OFF", type: mode)
             let plain = "{\n  \"lockFlag\" : \"\(flag)\",\n  \"vinNo\" : \"\(vin)\"\n}"
             guard let secret = ZeehoCrypto.aes256ECBBase64(plain: plain, key: secrets.vehicleAesKey) else {
                 return "云端控车密钥需要 32 位，请在签名密钥里检查"
@@ -389,7 +391,8 @@ struct ZeehoClient {
                 body: "{\"secret\":\"\(secret)\"}",
                 signBody: plain
             )
-            return commandMessage(result, success: action == .unlock ? "云端开锁指令已下发" : "云端关锁指令已下发")
+            let chosen = ZeehoJSON.isOK(point.json) ? result : point
+            return commandMessage(chosen, success: action == .unlock ? "云端开锁指令已下发" : "云端关锁指令已下发")
         case .charge:
             let value = chargeValue ?? ""
             guard !value.isEmpty else { return "先选择充电功率" }
@@ -591,7 +594,7 @@ struct ZeehoClient {
     }
 
     private func tireStatus(token: String, vin: String, secrets: ZeehoSecrets) async -> [String: Any]? {
-        let query = "vinNo=\(percent(vin))&timePeriodType=1"
+        let query = "sensorType=EXTERNAL&vinNo=\(percent(vin))"
         let result = await appRequest(
             method: "GET",
             urlText: "https://tapi.zeehoev.com/v1.0/app/cfmotoserverapp/app/vehicle/tire/monitoring?\(query)",
@@ -818,6 +821,8 @@ struct ZeehoClient {
         await attachInbox(token: token, secrets: secrets, status: &status)
     }
 
+    // MARK: - Inbox
+
     private func attachInbox(token: String, secrets: ZeehoSecrets, status: inout SigninStatus) async {
         guard let uid = status.userId, !uid.isEmpty else { return }
         let query = "messageKind=3&page=1&pageSize=1&userId=\(percent(uid))"
@@ -957,7 +962,7 @@ struct ZeehoClient {
             .description ?? ""
     }
 
-    private func appRequest(
+    func appRequest(
         method: String,
         urlText: String,
         token: String,
@@ -1000,6 +1005,27 @@ struct ZeehoClient {
 
     private func actionTimeout(_ urlText: String) -> TimeInterval {
         urlText.contains("network/unlock") ? 25 : 15
+    }
+
+    /// 几何面板 dbpoint/send：控车埋点后再发正式指令。
+    private func dbpoint(
+        token: String,
+        vin: String,
+        secrets: ZeehoSecrets,
+        functionCode: String,
+        type: String? = nil
+    ) async -> HTTPResult {
+        var paramDict: [String: Any] = ["vinNo": vin, "functionCode": functionCode]
+        if let type, !type.isEmpty { paramDict["type"] = type }
+        let paramStr = paramDict.map { "\"\($0)\":\"\($1)\"" }.joined(separator: ",")
+        let body = "{\"eventId\":\(0x2d6f),\"param\":\"\(paramStr)\",\"uuid\":\"\",\"zeehoParamTypeBO\":null}"
+        return await appRequest(
+            method: "POST",
+            urlText: "https://tapi.zeehoev.com/v1.0/app/cfmotoserverapp/dbpoint/send",
+            token: token,
+            secrets: secrets,
+            body: body
+        )
     }
 
     private func commandMessage(_ result: HTTPResult, success: String) -> String {
@@ -1336,4 +1362,63 @@ struct ZeehoClient {
         let text = ZeehoJSON.string(any).trimmingCharacters(in: .whitespacesAndNewlines)
         return text.isEmpty ? nil : text
     }
+}
+
+// MARK: - 盲盒
+
+/// 盲盒 / 补领结果
+struct ZeehoBonusClaim: Equatable {
+    var text: String
+    var prizeName: String
+    var integral: String
+    var type: String
+}
+
+extension ZeehoClient {
+    /// 签到之后的盲盒 + 补领。失败只记原因，不影响已经完成的签到。
+    func claimBonus(token: String, secrets: ZeehoSecrets) async -> ZeehoBonusClaim {
+        async let lottery = appRequest(
+            method: "POST",
+            urlText: "https://tapi.zeehoev.com/cfmotoservermine/H5/signin/lottery",
+            token: token,
+            secrets: secrets,
+            body: ""
+        )
+        async let extra = appRequest(
+            method: "POST",
+            urlText: "https://tapi.zeehoev.com/cfmotoservermine/H5/signin/supplementPrize",
+            token: token,
+            secrets: secrets,
+            body: ""
+        )
+        let (lotteryResult, extraResult) = await (lottery, extra)
+
+        func line(_ name: String, _ result: HTTPResult) -> String {
+            if ZeehoJSON.isOK(result.json) { return "\(name)：\(ZeehoJSON.message(result.json).isEmpty ? "已请求" : ZeehoJSON.message(result.json))" }
+            let why = ZeehoJSON.message(result.json).isEmpty ? (result.error ?? "HTTP \(result.status)") : ZeehoJSON.message(result.json)
+            return "\(name) 失败：\(why)"
+        }
+
+        let prize = prizeOf(lotteryResult.json)
+        return ZeehoBonusClaim(
+            text: "\(line("盲盒", lotteryResult))\n\(line("补领", extraResult))",
+            prizeName: prize?.0 ?? "",
+            integral: prize?.1 ?? "",
+            type: prize?.2 ?? ""
+        )
+    }
+}
+
+private func prizeOf(_ json: [String: Any]?) -> (String, String, String)? {
+    guard ZeehoJSON.isOK(json), let data = ZeehoJSON.object(json?["data"]) as [String: Any]? else { return nil }
+    func pick(_ keys: String...) -> String {
+        for k in keys {
+            let s = ZeehoJSON.string(data[k]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !s.isEmpty { return s }
+        }
+        return ""
+    }
+    let name = pick("prizeName", "name", "awardName", "goodsName", "title")
+    guard !name.isEmpty else { return nil }
+    return (name, pick("integral", "score", "points"), pick("type", "prizeType"))
 }

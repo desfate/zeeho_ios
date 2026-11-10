@@ -5,6 +5,8 @@ import UserNotifications
 enum ZeehoTokenError: LocalizedError {
     case invalid
     case busy
+    case duplicate
+    case maxAccounts
 
     var errorDescription: String? {
         switch self {
@@ -12,6 +14,10 @@ enum ZeehoTokenError: LocalizedError {
             return "没有找到 UUID 格式的 Token"
         case .busy:
             return "正在签到，请稍后再试"
+        case .duplicate:
+            return "这个账号已经添加过了"
+        case .maxAccounts:
+            return "暂时只支持最多两个账号"
         }
     }
 }
@@ -163,17 +169,26 @@ enum ZeehoEngine {
     }
 
     static func addAccount(_ raw: String) async throws -> SigninStatus {
-        let token = ZeehoToken.normalize(raw)
+        let token = ZeehoToken.normalize(raw).lowercased()
         guard ZeehoToken.isUUID(token) else { throw ZeehoTokenError.invalid }
         guard ZeehoGate.tryBegin() else { throw ZeehoTokenError.busy }
         defer { ZeehoGate.end() }
         guard let owner = ZeehoLock.tryAcquire() else { throw ZeehoTokenError.busy }
         defer { ZeehoLock.release(owner) }
         var accounts = ZeehoFiles.loadAccounts()
-        if !accounts.contains(where: { $0.token == token }) {
-            accounts.append(ZeehoStoredAccount(id: UUID().uuidString.lowercased(), label: "", token: token))
-            try ZeehoFiles.saveAccounts(accounts)
+        if accounts.contains(where: { $0.token.lowercased() == token }) {
+            throw ZeehoTokenError.duplicate
         }
+        if accounts.count >= 2 {
+            throw ZeehoTokenError.maxAccounts
+        }
+        accounts.append(ZeehoStoredAccount(
+            id: UUID().uuidString.lowercased(),
+            label: "",
+            token: token,
+            createdAtUnix: Date().timeIntervalSince1970
+        ))
+        try ZeehoFiles.saveAccounts(accounts)
         return await execute(generation: ZeehoGate.currentGeneration)
     }
 
@@ -253,6 +268,9 @@ enum ZeehoEngine {
             let previous = cached?.accounts?.first { $0.id == account.id }
             var row = AccountSignin.make(account: account, status: status, previous: previous)
             await runPointsIfDue(account: account, secrets: secrets, row: &row)
+            if row.posted == true {
+                await claimBonus(account: account, secrets: secrets, row: &row)
+            }
             await ZeehoFiles.cacheAvatar(id: account.id, url: row.avatar)
             rows.append(row)
         }
@@ -334,6 +352,15 @@ enum ZeehoEngine {
         ZeehoFiles.savePoints(prefs)
         let prior = row.message?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         row.message = prior.isEmpty ? run.text : "\(prior)\n\(run.text)"
+    }
+
+    /// 签到成功后尝试盲盒 + 补领。无论 continueDays 多少天都试，服务端自己判断。
+    private static func claimBonus(account: ZeehoStoredAccount, secrets: ZeehoSecrets, row: inout AccountSignin) async {
+        let claim = await ZeehoClient().claimBonus(token: account.token, secrets: secrets)
+        ZeehoFiles.savePrize(claim, day: ZeehoClock.todayString())
+        let prior = row.message?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let append = prior.isEmpty ? claim.text : "\(prior)\n\(claim.text)"
+        row.message = append
     }
 
     private static func runPointsNow(stored: [ZeehoStoredAccount]) async -> String {

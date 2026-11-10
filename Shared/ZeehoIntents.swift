@@ -40,7 +40,7 @@ struct ZeehoFindIntent: AppIntent {
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let msg = await runCommand(.find)
-        return .result(dialog: msg)
+        return .result(dialog: IntentDialog(stringLiteral: msg))
     }
 }
 
@@ -51,7 +51,7 @@ struct ZeehoHornIntent: AppIntent {
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let msg = await runCommand(.horn)
-        return .result(dialog: msg)
+        return .result(dialog: IntentDialog(stringLiteral: msg))
     }
 }
 
@@ -62,7 +62,7 @@ struct ZeehoSeatIntent: AppIntent {
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let msg = await runCommand(.seat)
-        return .result(dialog: msg)
+        return .result(dialog: IntentDialog(stringLiteral: msg))
     }
 }
 
@@ -73,7 +73,7 @@ struct ZeehoUnlockIntent: AppIntent {
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let msg = await runCommand(.unlock)
-        return .result(dialog: msg)
+        return .result(dialog: IntentDialog(stringLiteral: msg))
     }
 }
 
@@ -84,7 +84,7 @@ struct ZeehoLockIntent: AppIntent {
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let msg = await runCommand(.lock)
-        return .result(dialog: msg)
+        return .result(dialog: IntentDialog(stringLiteral: msg))
     }
 }
 
@@ -92,47 +92,48 @@ struct ZeehoLockIntent: AppIntent {
 
 @available(iOS 16.0, *)
 struct ZeehoVehicleShortcuts: AppShortcutsProvider {
+    @AppShortcutsBuilder
     static var appShortcuts: [AppShortcut] {
-        [
-            AppShortcut(
-                intent: ZeehoSignInIntent(),
-                phrases: [
-                    "用\(.applicationName)签到",
-                    "让\(.applicationName)打卡",
-                ],
-                shortTitle: "签到",
-                systemImageName: "checkmark.seal"
-            ),
-            AppShortcut(
-                intent: ZeehoFindIntent(),
-                phrases: ["寻车", "找车在哪", "\(.applicationName)寻车"],
-                shortTitle: "寻车",
-                systemImageName: "magnifyingglass"
-            ),
-            AppShortcut(
-                intent: ZeehoHornIntent(),
-                phrases: ["鸣笛", "按一下喇叭", "\(.applicationName)鸣笛"],
-                shortTitle: "鸣笛",
-                systemImageName: "speaker.wave.2"
-            ),
-            AppShortcut(
-                intent: ZeehoSeatIntent(),
-                phrases: ["开坐垫", "打开坐垫锁"],
-                shortTitle: "开坐垫",
-                systemImageName: "rectangle.on.rectangle.angled"
-            ),
-            AppShortcut(
-                intent: ZeehoUnlockIntent(),
-                phrases: ["开锁", "打开车锁"],
-                shortTitle: "开锁",
-                systemImageName: "lock.open"
-            ),
-            AppShortcut(
-                intent: ZeehoLockIntent(),
-                phrases: ["关锁", "锁车"],
-                shortTitle: "关锁",
-                systemImageName: "lock.fill"
-            ),
-        ]
+        AppShortcut(
+            intent: ZeehoSignInIntent(),
+            phrases: [
+                "用\(.applicationName)签到",
+                "让\(.applicationName)打卡",
+                "\(.applicationName)签到",
+                "\(.applicationName)打卡",
+            ],
+            shortTitle: "签到",
+            systemImageName: "checkmark.seal"
+        )
+        AppShortcut(
+            intent: ZeehoFindIntent(),
+            phrases: ["\(.applicationName)寻车", "\(.applicationName)找车"],
+            shortTitle: "寻车",
+            systemImageName: "magnifyingglass"
+        )
+        AppShortcut(
+            intent: ZeehoHornIntent(),
+            phrases: ["\(.applicationName)鸣笛", "\(.applicationName)按喇叭"],
+            shortTitle: "鸣笛",
+            systemImageName: "speaker.wave.2"
+        )
+        AppShortcut(
+            intent: ZeehoSeatIntent(),
+            phrases: ["\(.applicationName)开坐垫", "\(.applicationName)打开坐垫锁"],
+            shortTitle: "开坐垫",
+            systemImageName: "rectangle.on.rectangle.angled"
+        )
+        AppShortcut(
+            intent: ZeehoUnlockIntent(),
+            phrases: ["\(.applicationName)开锁", "\(.applicationName)打开车锁"],
+            shortTitle: "开锁",
+            systemImageName: "lock.open"
+        )
+        AppShortcut(
+            intent: ZeehoLockIntent(),
+            phrases: ["\(.applicationName)关锁", "\(.applicationName)锁车"],
+            shortTitle: "关锁",
+            systemImageName: "lock.fill"
+        )
     }
 }
